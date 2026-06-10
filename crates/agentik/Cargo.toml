@@ -7,9 +7,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# agentik-core = { workspace = true }
-# agentik-sdk = { workspace = true }
-# agentik-types = { workspace = true }
+agentik-core = { path = "../agentik-core" }
+agentik-sdk = { path = "../agentik-sdk" }
+agentik-types = { path = "../agentik-types" }
 
 # Sub-crate features are surfaced as umbrella features so that downstream
 # users can opt in/out in one place. Mirror the names actually defined in

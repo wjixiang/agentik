@@ -5,6 +5,11 @@ version = 4
 [[package]]
 name = "agentik"
 version = "0.1.0"
+dependencies = [
+ "agentik-core",
+ "agentik-sdk",
+ "agentik-types",
+]
 
 [[package]]
 name = "agentik-core"

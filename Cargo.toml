@@ -1,9 +1,6 @@
 [workspace]
-resolver = "2"
-members = [
-  "crates/agentik-sdk",
-  "crates/agentik-types",
-]
+resolver = "3"
+members = ["crates/agentik-sdk", "crates/agentik-types", "crates/agentik-core", "crates/agentik-proc"]
 
 [workspace.package]
 edition = "2024"

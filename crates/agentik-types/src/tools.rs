@@ -1,14 +1,55 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, )]
+/// A struct that can describe its own tool definition.
+///
+/// This trait is typically derived via `#[derive(ToolInput)]` (from the
+/// `agentik-proc` crate) paired with `#[tool(name, description)]`.
+///
+/// Implementations return a [`ToolDefinition`] whose JSON Schema mirrors
+/// the struct's fields: each named field becomes a parameter, field types
+/// map to JSON Schema types, and `Option<T>` fields are treated as optional.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Deserialize, ToolInput)]
+/// #[tool(name = "bash", description = "Run shell command")]
+/// pub struct BashInput {
+///     #[doc = "Brief explanation"]
+///     pub reason: String,
+/// }
+/// ```
+pub trait ToolInput: Serialize {
+    /// Generate a [`ToolDefinition`] from the struct's metadata.
+    fn definition() -> ToolDefinition;
+}
+
+/// Blanket impl for `serde_json::Value` — used by test-only tools
+/// and tools that accept arbitrary JSON without typed deserialization.
+impl ToolInput for Value {
+    fn definition() -> ToolDefinition {
+        ToolDefinition {
+            name: String::new(),
+            description: String::new(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Map::new(),
+                required: vec![],
+                additional: Map::new(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: ToolInputSchema,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, )]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolInputSchema {
     #[serde(rename = "type")]
     pub schema_type: String,
@@ -27,12 +68,10 @@ pub enum ToolChoice {
     #[serde(rename = "any")]
     Any,
     #[serde(rename = "tool")]
-    Tool {
-        name: String,
-    },
+    Tool { name: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, )]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolUse {
     pub id: String,
     pub name: String,
@@ -59,26 +98,19 @@ pub enum ToolResultContent {
 #[serde(tag = "type")]
 pub enum ToolResultBlock {
     #[serde(rename = "text")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, )]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ImageSource {
     #[serde(rename = "base64")]
-    Base64 {
-        media_type: String,
-        data: String,
-    },
+    Base64 { media_type: String, data: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, )]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolEffect {
     AttemptComplete,
@@ -92,7 +124,7 @@ pub enum ToolCallResponseContent {
     Image(ImageSource),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, )]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallResponse {
     pub tool_use_id: String,
     pub content: Vec<ToolCallResponseContent>,
@@ -101,8 +133,6 @@ pub struct ToolCallResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<ToolEffect>,
 }
-
-
 
 impl ToolResult {
     pub fn into_call_response(self, effects: Vec<ToolEffect>) -> ToolCallResponse {
@@ -222,6 +252,18 @@ impl ToolBuilder {
 
     pub fn additional_property(mut self, key: impl Into<String>, value: Value) -> Self {
         self.additional.insert(key.into(), value);
+        self
+    }
+
+    pub fn default(mut self, name: impl Into<String>, value: Value) -> Self {
+        let param_name = name.into();
+        if let Some(obj) = self
+            .properties
+            .get_mut(&param_name)
+            .and_then(|schema| schema.as_object_mut())
+        {
+            obj.insert("default".to_string(), value);
+        }
         self
     }
 

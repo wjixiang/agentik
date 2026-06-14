@@ -33,7 +33,7 @@ pub use tools::{
     ServerTool, WebSearchParameters,
     ImageSource as ToolImageSource,
     ToolEffect, ToolCallResponseContent, ToolCallResponse,
-
+    ToolInput,
 };
 
 pub type Tool = ToolDefinition;

@@ -1,43 +1,72 @@
-# agentik-sdk
+# agentik
 
-Comprehensive, type-safe Rust SDK for the Anthropic Claude API with multi-provider support, streaming, tool use, vision, file management, batch processing, and token/cost tracking.
+A Rust workspace for building LLM agents on top of the Anthropic-compatible API surface. It ships a type-safe SDK, a proc-macro for declarative tool schemas, and a domain-agnostic agent runtime with a multi-agent process manager.
 
-This project is a hard fork of [dimichgh/anthropic-sdk-rust](https://github.com/dimichgh/anthropic-sdk-rust).
+This project is a hard fork of [dimichgh/anthropic-sdk-rust](https://github.com/dimichgh/anthropic-sdk-rust), extended with an agent framework on top.
 
-## Overview
+## Workspace
 
-`agentik-sdk` is a Rust workspace containing two crates:
+`agentik` is a Cargo workspace containing four crates:
 
 | Crate | Description |
 |---|---|
-| [`agentik-sdk`](crates/agentik-sdk) | Full-featured async client with HTTP layer, streaming engine, retry logic, provider abstraction, model pool, token counter, and file utilities. |
-| [`agentik-types`](crates/agentik-types) | Shared type definitions for the Anthropic API — messages, tools, batches, files, models, streaming events, and agent events. |
+| [`agentik-types`](crates/agentik-types) | Shared type definitions for the Anthropic API — messages, tools, batches, files, models, streaming events, agent events, errors. |
+| [`agentik-sdk`](crates/agentik-sdk) | Full-featured async client: HTTP layer, SSE streaming engine, retry/backoff, multi-provider abstraction, model pool, token counter, file utilities. |
+| [`agentik-proc`](crates/agentik-proc) | Proc-macro crate. Provides `#[derive(ToolInput)]` so tool input structs auto-generate their own JSON Schema `Tool` definition. |
+| [`agentik-core`](crates/agentik-core) | Domain-agnostic agent runtime. Plug in any `AgentContext` to specialize behavior: agent loop, memory with compaction, lifecycle, toolset, `ProcessManager`. |
+
+```
+crates/
+├── agentik-types/   # Shared types (no deps on the rest of the workspace)
+├── agentik-sdk/     # Async client + provider abstraction (depends on -types)
+├── agentik-proc/    # #[derive(ToolInput)] (depends on -sdk at expansion site)
+└── agentik-core/    # Agent runtime (depends on -sdk and -proc)
+```
 
 ## Features
 
-- **Messages API** — Create conversations with Claude models (system prompts, multi-turn, temperature, top-p, stop sequences)
-- **Streaming (SSE)** — Real-time token-by-token streaming with event-driven callbacks (`on_text`, `on_message`, `on_error`, `on_end`) and async iteration via `Stream` trait
+### SDK (`agentik-sdk`)
+
+- **Messages API** — Create conversations with system prompts, multi-turn, temperature, top-p, stop sequences
+- **Streaming (SSE)** — Token-by-token streaming with event-driven callbacks (`on_text`, `on_message`, `on_error`, `on_end`) and async iteration via the `Stream` trait
 - **Stream reliability** — Automatic idle-timeout detection and reconnection before `MessageStart`, graceful HTTP body draining, configurable retry policies with exponential backoff and jitter
-- **Tool / Function calling** — Define tools with JSON Schema, handle `tool_use` and `tool_result` content blocks, server tools (web search)
-- **Vision** — Send images via base64 or URL as part of the conversation
-- **Files API (Beta)** — Upload, list, and download files with integrity verification (SHA-256)
+- **Tool / function calling** — JSON Schema tools, `tool_use` / `tool_result` blocks, server tools (web search)
+- **Vision** — Send images via base64 or URL
+- **Files API (Beta)** — Upload, list, download with SHA-256 integrity verification
 - **Batch processing (Beta)** — Create and manage batch inference requests
-- **Models API** — List and inspect available models with capability and pricing metadata
-- **Agent events** — Unified `AgentEvent` enum for TUI/logging integration covering the full agent lifecycle (streaming deltas, tool calls, completion)
-- **Token & cost tracking** — `TokenCounter` with per-model pricing, accumulated usage stats, and cost estimation
-- **Multi-provider abstraction** — `LlmProvider` trait with implementations for Anthropic-compatible providers:
+- **Models API** — List and inspect models with capability and pricing metadata
+- **Token & cost tracking** — `TokenCounter` with per-model pricing, accumulated usage, and cost estimation
+- **Multi-provider abstraction** — `LlmProvider` trait with implementations:
   - Anthropic (direct)
   - DeepSeek (`deepseek-v4-pro`, `deepseek-v4-flash`)
   - MiniMax
   - SenseNova
   - Mimo
   - ZAI
-- **Model pool** — Round-robin model selection across providers
-- **Flexible auth** — Anthropic `x-api-key`, Bearer token, or custom token header for third-party gateways
-- **Builder patterns** — Fluent API for `MessageCreateBuilder`, `ClientConfig`, `ToolBuilder`, `FileBuilder`, `BatchRequestBuilder`
+- **Model pool** — Round-robin model selection across providers, with sticky selection by name
+- **Flexible auth** — Anthropic `x-api-key`, Bearer token, or custom header for third-party gateways
 - **Mock support** — `MockApiClient` via `mockall` for testing
 
+### Agent runtime (`agentik-core`)
+
+- **Uniform agent loop** — One behavioral loop for all agents. Agent personality and tooling are configured *only* through the toolset and system prompt; no agent-specific code paths in the loop itself (see `crates/agentik-core/src/agent.rs`).
+- **Reactive context** — `AgentContext` trait: implement `read()` / `write()`. The loop polls the version at each boundary and injects a `[context-update]` message into memory when it changes. Built-in `InMemoryAgentContext` for tests.
+- **Memory with compaction** — `Memory` keeps a rolling list of summarized `MemoryItem`s. When token pressure rises against the model's `context_length`, the oldest segment is summarized by the LLM into a `summary` and a fresh segment is opened.
+- **Toolset** — `ToolRegistration` + `Toolset` handle schema exposure, parallel dispatch, per-tool timeouts, and `ToolEffect` propagation. Every `T: ToolFunction` is auto-erased to `DynToolFunction` for heterogeneous storage.
+- **Built-in tools** — `attempt_complete`, `abort_task` (lifecycle), `bash` (subprocess with kill-on-drop and tail-truncated output).
+- **Lifecycle & effects** — `AgentLifecycle` (IDLE / RUNNING / ABORTED) driven by tool-emitted `ToolEffect`s, so agents self-terminate without external orchestration.
+- **Retry with feedback** — Retryable `AgentError`s trigger exponential backoff and the failure reason is injected back into memory for the next attempt.
+- **Observation** — Optional `mpsc` event channel streams `AgentUiEvent`s (Thinking, LlmResponse, ToolCall, ToolResult, Requesting, Done, Error) to a TUI or logger.
+- **Snapshots** — `AgentSnapshotStorage` trait with a SQLite backend for persisting agent memory and status.
+- **Multi-agent `ProcessManager`** — Spawn, start, stop, restart, and inject messages into multiple agents as independent tokio tasks; aggregates all per-agent events into one `broadcast::Receiver<ProcessEvent>` stream with exit status (`Completed` / `Error` / `Panicked` / `Cancelled` / `Stopped`).
+
+### Proc macros (`agentik-proc`)
+
+- **`#[derive(ToolInput)]`** — Generates `impl ToolInput` from a struct, including the `ToolBuilder` chain, required vs. optional fields (via `Option<T>` or `#[default = ...]`), and `#[desc = "..."]` per-field descriptions. Pair with `#[tool(name = "...", description = "...")]` on the struct.
+
 ## Quick Start
+
+### Talking to a model directly via the SDK
 
 ```toml
 [dependencies]
@@ -64,49 +93,128 @@ async fn main() -> agentik_sdk::Result<()> {
 }
 ```
 
-## Streaming
+### Running an agent with a custom tool
+
+```toml
+[dependencies]
+agentik-core = { path = "..." }
+agentik-sdk  = { path = "..." }
+agentik-proc = { path = "..." }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
 
 ```rust
-use agentik_sdk::Anthropic;
-use agentik_types::MessageCreateBuilder;
-use futures::StreamExt;
+use std::sync::Arc;
 
-let client = Anthropic::new("your-api-key", "https://api.anthropic.com")?;
+use agentik_core::agent::{Agent, AgentConfig};
+use agentik_core::context::InMemoryAgentContext;
+use agentik_core::tools::{ToolFunction, ToolResult, ToolRegistration, error::ToolError};
+use agentik_core::toolset::Toolset;
+use agentik_sdk::model::model_pool::ModelPool;
+use agentik_sdk::provider::mimo::{MimoProvider, MODEL_MIMO_V2_5};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
-let mut stream = client.messages().create_stream(
-    MessageCreateBuilder::new("claude-sonnet-4-20250514", 1024)
-        .user("Tell me a story")
-        .build(),
-).await?;
+// Declarative tool schema via proc macro.
+#[derive(Debug, Deserialize, Serialize, agentik_proc::ToolInput)]
+#[tool(name = "echo", description = "Echo back a message")]
+pub struct EchoInput {
+    #[desc = "The text to echo back"]
+    pub text: String,
+}
 
-while let Some(event) = stream.next().await {
-    match event? {
-        agentik_types::MessageStreamEvent::ContentBlockDelta { delta, .. } => {
-            // Process incremental text
-        }
-        agentik_types::MessageStreamEvent::MessageStop => break,
-        _ => {}
+pub struct EchoTool;
+
+#[async_trait]
+impl ToolFunction for EchoTool {
+    type Input = EchoInput;
+
+    async fn run(&self, input: EchoInput) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("echo", format!("echo: {}", input.text)))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let provider = MimoProvider::new(None, std::env::var("MIMO_API_KEY")?);
+    let model = provider.get_model(MODEL_MIMO_V2_5)?;
+
+    let mut pool = ModelPool::new();
+    pool.add_model(model);
+
+    let ctx = Arc::new(InMemoryAgentContext::new());
+
+    let mut agent = Agent::builder()
+        .with_model_pool(Arc::new(pool))
+        .with_context(ctx)
+        .with_system_prompt_identity("You are a minimal demo agent.")
+        .with_config(AgentConfig::default())
+        .build()
+        .await?;
+
+    agent.register_tool(ToolRegistration::from(EchoTool))?;
+    agent.start().await?;
+    Ok(())
+}
+```
+
+### Multi-agent orchestration
+
+```rust
+use agentik_core::process::ProcessManager;
+
+let manager = ProcessManager::new();
+
+// Spawn (registers but does not start) — returns the agent ID.
+let id = manager.spawn(builder).await?;
+
+manager.start(&id)?;
+manager.inject_message(&id, vec![/* ContentBlock::Text { ... } */])?;
+
+let mut events = manager.events();
+while let Ok(ev) = events.recv().await {
+    println!("{ev:?}");
+}
+
+// Graceful shutdown of every agent.
+let exits = manager.shutdown().await;
+```
+
+## Tool authoring
+
+Tools implement `ToolFunction` with an associated strongly-typed `Input`. The framework deserializes the LLM's JSON into `Input` before `run` is called, so tool bodies stay free of `serde_json::Value` plumbing.
+
+```rust
+#[derive(Deserialize, agentik_proc::ToolInput)]
+#[tool(name = "get_weather", description = "Current weather for a city")]
+struct WeatherInput {
+    #[desc = "City name"]
+    city: String,
+
+    #[desc = "Units: metric or imperial"]
+    #[default = "metric"]
+    units: Option<String>,
+}
+
+struct WeatherTool;
+
+#[async_trait]
+impl ToolFunction for WeatherTool {
+    type Input = WeatherInput;
+    async fn run(&self, i: WeatherInput) -> Result<ToolResult, ToolError> {
+        // ... fetch weather ...
+        Ok(ToolResult::success("weather", format!("{}: sunny", i.city)))
     }
 }
 ```
 
-Callback-based streaming is also supported:
+Tools can declare side effects that the agent loop acts on:
 
 ```rust
-let final_message = client.messages().create_stream(request).await?
-    .on_text(|delta, snapshot| print!("{}", delta))
-    .on_error(|error| eprintln!("Error: {}", error))
-    .final_message().await?;
+fn effects(&self) -> Vec<ToolEffect> { vec![ToolEffect::AttemptComplete] }
 ```
 
-## Multi-Provider Setup
-
-```rust
-use agentik_sdk::provider::deepseek::{DeepseekProvider, MODEL_DEEPSEEK_V4_PRO};
-
-let provider = DeepseekProvider::new(None, "your-deepseek-key".into());
-let model = provider.get_model(MODEL_DEEPSEEK_V4_PRO)?;
-```
+The built-in lifecycle tools (`attempt_complete`, `abort_task`) use this mechanism to flip the agent to `IDLE` / `ABORTED`.
 
 ## Configuration
 
@@ -123,7 +231,7 @@ let config = ClientConfig::new("your-api-key", "https://api.anthropic.com")
 let client = Anthropic::with_config(config)?;
 ```
 
-### Environment Variables
+### Environment variables
 
 Copy `.env.example` to `.env`:
 
@@ -132,11 +240,10 @@ ANTHROPIC_API_KEY="your-api-key-here"
 DEEPSEEK_API_KEY="your-api-key-here"
 SENSENOVA_API_KEY="your-api-key-here"
 ZAI_API_KEY="your-api-key-here"
+MIMO_API_KEY="your-api-key-here"
 ```
 
-## API Resources
-
-The client exposes four resource endpoints:
+## API Resources (SDK)
 
 | Resource | Description |
 |---|---|
@@ -145,55 +252,66 @@ The client exposes four resource endpoints:
 | `client.files()` | Upload and manage files |
 | `client.models()` | List and inspect models |
 
-## Workspace Structure
+## Architecture notes
+
+- **Agent loop design.** The core loop only provides generic capabilities — request/response cycling, lifecycle management, effect application, memory compaction. It never encodes agent-specific behavior, tool selection, or prompt engineering. Configure those exclusively via the toolset and system prompt (`agent.rs:1` documents this contract).
+- **Termination.** A response with no tool calls signals completion (matches the model's trained prior). `attempt_complete` is retained for compatibility but deprecated; the loop flips to `IDLE` on the no-tool-call branch regardless.
+- **Type erasure.** `ToolFunction::Input` is an associated type, so heterogeneous storage erases to `DynToolFunction` via a blanket impl — concrete call sites keep full type information.
+- **Multi-agent.** Each agent runs in its own tokio task with its own command channel, status watch, and cancellation token. A forwarder task merges per-agent `AgentUiEvent`s, lifecycle changes, and task-exit signals into the manager's `ProcessEvent` broadcast stream.
+
+## Workspace structure
 
 ```
-agentik-sdk/
-├── Cargo.toml                    # Workspace manifest
-├── crates/
-│   ├── agentik-types/             # Shared type definitions
-│   │   └── src/
-│   │       ├── messages.rs        # Message, Role, ContentBlock, Builder
-│   │       ├── tools.rs           # Tool, ToolChoice, ToolUse, ToolResult
-│   │       ├── models.rs          # Model enum (Anthropic, Google, etc.)
-│   │       ├── models_api.rs      # ModelObject, ModelList, pricing, capabilities
-│   │       ├── streaming.rs       # SSE event types
-│   │       ├── batches.rs         # Batch types
-│   │       ├── files_api.rs       # File types
-│   │       ├── agent_events.rs    # AgentEvent enum
-│   │       ├── shared.rs          # RequestId, Usage
-│   │       └── errors.rs         # AnthropicError
-│   └── agentik-sdk/               # Full SDK implementation
-│       └── src/
-│           ├── client.rs          # Anthropic client (entry point)
-│           ├── config.rs          # ClientConfig, LogLevel
-│           ├── http/
-│           │   ├── client.rs      # HTTP client wrapper
-│           │   ├── auth.rs        # AuthMethod, AuthHandler
-│           │   ├── retry.rs       # RetryPolicy with backoff/jitter
-│           │   └── streaming.rs  # SSE stream parser
-│           ├── streaming.rs       # MessageStream (event-driven + Stream trait)
-│           ├── resources/
-│           │   ├── messages.rs     # Messages API
-│           │   ├── batches.rs     # Batches API
-│           │   ├── files.rs       # Files API
-│           │   └── models.rs      # Models API
-│           ├── provider/
-│           │   ├── deepseek.rs    # DeepSeek provider
-│           │   ├── minimax.rs     # MiniMax provider
-│           │   ├── sensenova.rs  # SenseNova provider
-│           │   ├── mimo.rs       # Mimo provider
-│           │   ├── zai.rs        # ZAI provider
-│           │   └── client.rs      # ApiClient trait
-│           ├── model/             # Model, ModelInfo, ModelPool
-│           ├── tokens.rs          # TokenCounter, pricing, cost tracking
-│           ├── files.rs           # File, FileBuilder, integrity checks
-│           └── utils.rs           # Logging init
+agentik/
+├── Cargo.toml                          # Workspace manifest
+└── crates/
+    ├── agentik-types/                  # Shared type definitions
+    │   └── src/
+    │       ├── messages.rs             # Message, Role, ContentBlock, Builder
+    │       ├── tools.rs                # Tool, ToolChoice, ToolUse, ToolResult, ToolInput
+    │       ├── models.rs               # Model enum (Anthropic, Google, etc.)
+    │       ├── models_api.rs           # ModelObject, ModelList, pricing, capabilities
+    │       ├── streaming.rs            # SSE event types
+    │       ├── batches.rs              # Batch types
+    │       ├── files_api.rs            # File types
+    │       ├── agent_events.rs         # AgentEvent / AgentUiEvent
+    │       ├── shared.rs               # RequestId, Usage
+    │       └── errors.rs               # AnthropicError
+    ├── agentik-sdk/                    # Full SDK implementation
+    │   └── src/
+    │       ├── client.rs               # Anthropic client (entry point)
+    │       ├── config.rs               # ClientConfig, LogLevel
+    │       ├── http/                   # HTTP client, auth, retry, SSE parser
+    │       ├── streaming.rs            # MessageStream (events + Stream trait)
+    │       ├── resources/              # messages, batches, files, models APIs
+    │       ├── provider/               # deepseek, minimax, sensenova, mimo, zai, ApiClient
+    │       ├── model/                  # Model, ModelInfo, ModelPool
+    │       ├── tokens.rs               # TokenCounter, pricing, cost tracking
+    │       └── files.rs                # File, FileBuilder, integrity checks
+    ├── agentik-proc/                   # Proc macros
+    │   └── src/lib.rs                  # #[derive(ToolInput)]
+    └── agentik-core/                   # Agent runtime
+        └── src/
+            ├── lib.rs
+            ├── agent.rs                # Agent + agent_workflow loop
+            ├── agent_builder.rs        # Fluent AgentBuilder
+            ├── context.rs              # AgentContext trait, InMemoryAgentContext
+            ├── lifecycle.rs            # AgentLifecycle (IDLE/RUNNING/ABORTED)
+            ├── memory.rs               # Memory with summarization/compaction
+            ├── message_ext.rs          # AgentMessageExt helpers
+            ├── prompt/                 # SystemPromptBuilder, context, compact prompts
+            ├── process/                # ProcessManager + commands + events
+            ├── storage/                # AgentSnapshotStorage + SQLite impl
+            ├── testing.rs              # Test helpers (dummy ModelInfo, mock pool)
+            ├── toolset.rs              # Re-exports ToolRegistration / Toolset
+            ├── tools/                  # ToolFunction trait, registry, executor,
+            │                           #   bash_tool, lifecycle_tools, errors
+            └── types.rs                # Re-exports ToolEffect, ToolError
 ```
 
 ## Requirements
 
-- Rust 1.85+
+- Rust 1.85+ (edition 2024)
 
 ## License
 

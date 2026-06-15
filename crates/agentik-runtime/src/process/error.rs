@@ -1,7 +1,7 @@
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::error::AgentError;
+use agentik_core::error::AgentError;
 
 /// Errors produced by the [`ProcessManager`](super::ProcessManager).
 #[derive(Debug, Error)]

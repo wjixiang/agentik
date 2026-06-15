@@ -165,6 +165,11 @@ impl Agent {
             iteration += 1;
             match self.agent_workflow(retry_feedback.take()).await {
                 Ok(()) => consecutive_retries = 0,
+                Err(AgentError::CompactionRebuild) => {
+                    // Compaction completed — re-enter the workflow with fresh context
+                    tracing::info!("compaction rebuild, re-entering workflow");
+                    continue;
+                }
                 Err(e) if e.is_retryable() && consecutive_retries < self.config.max_retries => {
                     consecutive_retries += 1;
                     tracing::warn!(
@@ -204,7 +209,9 @@ impl Agent {
 
     /// Core agent workflow
     ///
-    /// Basic process: build context -> request API -> execute tool calls -> append to memory
+    /// Basic process: build context -> request API -> execute tool calls -> append to memory.
+    /// Returns `Err(AgentError::CompactionRebuild)` when a compaction occurred and the
+    /// caller should re-enter this method with fresh context.
     async fn agent_workflow(&mut self, retry_feedback: Option<String>) -> Result<(), AgentError> {
         if let Some(feedback) = retry_feedback {
             self.inject_message(vec![ContentBlock::Text { text: feedback }])
@@ -371,15 +378,22 @@ impl Agent {
             self.model_pool.get_model_roundrobin().unwrap()
         };
 
-        let est_total_token = self.token_budget.estimate_total_token(context.len() as u64);
-
-        if est_total_token * 9 > (model.model_info.context_length * 10) {
+        // Accurate overflow detection using full message-list token estimation,
+        // matching OpenCode's `compactIfNeeded()` logic.
+        let conversation_msgs = self.memory.render_context()?;
+        if self.token_budget.should_compact(
+            &conversation_msgs,
+            model.model_info.context_length,
+            model.model_info.max_output_tokens,
+        ) {
             tracing::debug!(
-                est_tokens = est_total_token,
                 context_length = model.model_info.context_length,
+                max_output_tokens = model.model_info.max_output_tokens,
                 "context pressure detected, compacting"
             );
             self.memory.compact(model.as_ref()).await?;
+            // Rebuild context after compaction
+            return Err(AgentError::CompactionRebuild);
         }
 
         let mut stream = model
@@ -450,12 +464,22 @@ impl Agent {
     }
 }
 
+/// Default token buffer before compaction triggers (matching OpenCode).
+const COMPACTION_BUFFER_TOKENS: u64 = 20_000;
+/// Default number of tokens to preserve in the "recent" tail during compaction.
+const DEFAULT_KEEP_TOKENS: u64 = 8_000;
+
 #[derive(Default)]
 pub struct TokenBudget {
     append_tokens: u64,
     latest_usage: u64,
 }
 impl TokenBudget {
+    /// Estimate token count for a single message.
+    ///
+    /// Uses the actual `input_tokens` from the API response if available,
+    /// otherwise falls back to the chars/4 heuristic (matching OpenCode's
+    /// `Token.estimate()`).
     pub fn count_token_est(&self, msg: &Message) -> u64 {
         if let Some(usage) = &msg.usage {
             return usage.input_tokens;
@@ -467,12 +491,38 @@ impl TokenBudget {
         content_str.len() as u64 / 4
     }
 
+    /// Estimate token count for an entire message list.
+    ///
+    /// This is the accurate version used for compaction decisions.
+    /// It sums per-message estimates (preferring API-reported tokens when
+    /// available, falling back to chars/4).
+    pub fn estimate_messages_tokens(&self, messages: &[Message]) -> u64 {
+        messages.iter().map(|m| self.count_token_est(m)).sum()
+    }
+
     pub fn increment_new_msg(&mut self, msg: &Message) {
         self.append_tokens = self.count_token_est(msg);
     }
 
     pub fn estimate_total_token(&self, system_prompt_token: u64) -> u64 {
         self.append_tokens + self.latest_usage + system_prompt_token
+    }
+
+    /// Determine whether the conversation should be compacted.
+    ///
+    /// Uses the accurate full-message-list token estimate rather than the
+    /// crude append-only heuristic. Mirrors OpenCode's `compactIfNeeded()`:
+    /// triggers when total tokens >= context - max(output_tokens, buffer).
+    pub fn should_compact(
+        &self,
+        messages: &[Message],
+        context_length: u64,
+        max_output_tokens: u64,
+    ) -> bool {
+        let total = self.estimate_messages_tokens(messages);
+        let reserve = max_output_tokens.max(COMPACTION_BUFFER_TOKENS);
+        let usable = context_length.saturating_sub(reserve);
+        total >= usable
     }
 }
 

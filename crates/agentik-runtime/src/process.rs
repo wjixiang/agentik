@@ -1,6 +1,6 @@
 //! Multi-agent process manager.
 //!
-//! [`ProcessManager`] spawns, monitors, and controls multiple [`Agent`](crate::Agent)
+//! [`ProcessManager`] spawns, monitors, and controls multiple [`Agent`](agentik_core::Agent)
 //! instances as independent tokio tasks.  Each agent gets its own event channel and
 //! cancellation token; the manager aggregates all events into a single
 //! [`broadcast::Receiver<ProcessEvent>`](ProcessEvent) stream and exposes lifecycle
@@ -17,9 +17,9 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agent::Agent;
-use crate::agent_builder::AgentBuilder;
-use crate::lifecycle::AgentLifecycleStatus;
+use agentik_core::agent::Agent;
+use agentik_core::agent_builder::AgentBuilder;
+use agentik_core::lifecycle::AgentLifecycleStatus;
 
 pub use error::ProcessError;
 pub use event::{ProcessEvent, ProcessExitStatus};
@@ -101,7 +101,7 @@ impl ProcessManager {
                 source: e,
             })?;
 
-        let agent_id = agent.id;
+        let agent_id = agent.id();
 
         // Per-agent channels.
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();

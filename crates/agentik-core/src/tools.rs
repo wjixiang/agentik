@@ -10,6 +10,7 @@ pub mod executor;
 pub mod function;
 pub mod registry;
 pub mod toolset;
+pub mod truncation;
 
 pub use error::{ToolError, ToolOperationResult};
 pub use executor::{ToolExecutionConfig, ToolExecutionConfigBuilder, ToolExecutor};

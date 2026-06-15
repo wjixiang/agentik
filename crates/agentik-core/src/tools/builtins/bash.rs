@@ -8,16 +8,20 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::tools::{ToolError, ToolFunction};
+use crate::tools::truncation::{TruncationConfig, truncate_tool_output};
 
 /// Hard ceiling enforced by the framework wrapper. The real per-command
 /// timeout comes from `BashInput::timeout` and is enforced inside `run()`,
 /// but we raise the framework ceiling so it never pre-empts a legitimate
 /// long-running command.
 const FRAMEWORK_TIMEOUT_CEILING_SECS: u64 = 600;
-/// Maximum chars of combined output returned to the model. Longer output
-/// is truncated to its tail (most recent lines matter most), matching the
-/// behavior of claude-code / opencode bash tools.
-const MAX_OUTPUT_CHARS: usize = 30_000;
+/// Bash tool output uses a higher line limit than the default since command
+/// output is often line-oriented. The unified truncation module enforces
+/// byte limits; here we raise the line ceiling for bash specifically.
+const BASH_MAX_LINES: usize = 2_000;
+/// Bash tool byte limit — higher than default to avoid over-truncating
+/// command output that the agent may need for debugging.
+const BASH_MAX_BYTES: usize = 100 * 1_024; // 100 KB
 
 #[derive(Debug, Deserialize, Serialize, agentik_proc::ToolInput)]
 #[tool(
@@ -131,19 +135,11 @@ fn format_output(stdout: &str, stderr: &str, exit_code: Option<i32>) -> String {
         combined.push_str("(no output)");
     }
 
-    truncate_tail(&combined, MAX_OUTPUT_CHARS)
-}
-
-/// Keep the last `max_chars` characters of `s`, prefixed with a notice when
-/// truncation occurs. The tail matters most for command output (errors and
-/// final results live at the end).
-fn truncate_tail(s: &str, max_chars: usize) -> String {
-    let total = s.chars().count();
-    if total <= max_chars {
-        return s.to_string();
-    }
-    let tail: String = s.chars().skip(total - max_chars).collect();
-    format!("... [output truncated, showing last {max_chars} chars] ...\n\n{tail}")
+    let config = TruncationConfig {
+        max_lines: BASH_MAX_LINES,
+        max_bytes: BASH_MAX_BYTES,
+    };
+    truncate_tool_output(&combined, &config).content
 }
 
 #[cfg(test)]
@@ -171,16 +167,25 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_tail_short() {
-        assert_eq!(truncate_tail("abc", 10), "abc");
+    fn test_format_output_short() {
+        let config = TruncationConfig {
+            max_lines: 100,
+            max_bytes: 1_000_000,
+        };
+        assert_eq!(truncate_tool_output("abc", &config).content, "abc");
+        assert!(!truncate_tool_output("abc", &config).truncated);
     }
 
     #[test]
-    fn test_truncate_tail_long() {
-        let s = "a".repeat(100);
-        let out = truncate_tail(&s, 20);
-        assert!(out.starts_with("... [output truncated"));
-        assert!(out.ends_with(&"a".repeat(20)));
+    fn test_format_output_long() {
+        let config = TruncationConfig {
+            max_lines: 10,
+            max_bytes: 1_000_000,
+        };
+        let s: String = (0..20).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let out = truncate_tool_output(&s, &config);
+        assert!(out.truncated);
+        assert!(out.content.contains("[output truncated"));
     }
 
     #[tokio::test]

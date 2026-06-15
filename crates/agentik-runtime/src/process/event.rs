@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 use agentik_sdk::types::AgentUiEvent;
 
-use crate::lifecycle::AgentLifecycleStatus;
+use agentik_core::lifecycle::AgentLifecycleStatus;
 
 /// Event emitted by the [`ProcessManager`](super::ProcessManager)'s aggregated event stream.
 ///

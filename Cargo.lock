@@ -45,6 +45,14 @@ dependencies = [
 [[package]]
 name = "agentik-runtime"
 version = "0.1.0"
+dependencies = [
+ "agentik-core",
+ "agentik-sdk",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
 
 [[package]]
 name = "agentik-sdk"

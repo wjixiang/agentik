@@ -9,7 +9,8 @@ use tokio::time::sleep;
 
 use super::error::{ToolError, ToolOperationResult};
 use super::registry::ToolRegistry;
-use agentik_sdk::types::{ContentBlock, Message, ToolResult, ToolUse};
+use super::truncation::{TruncationConfig, truncate_tool_output};
+use agentik_sdk::types::{ContentBlock, Message, ToolResult, ToolResultContent, ToolUse};
 
 /// Configuration for tool execution.
 #[derive(Debug, Clone)]
@@ -102,7 +103,8 @@ impl ToolExecutor {
                             continue;
                         }
                     }
-                    return Ok(result);
+                    // Apply unified truncation to tool output (head/tail preservation)
+                    return Ok(truncate_result(result));
                 }
                 Err(err) => {
                     if attempt < self.config.max_retries && self.should_retry_error_type(&err) {
@@ -291,6 +293,31 @@ impl ToolExecutionConfigBuilder {
     /// Build the configuration.
     pub fn build(self) -> ToolExecutionConfig {
         self.config
+    }
+}
+
+/// Apply unified head/tail truncation to a tool result's text content.
+fn truncate_result(result: ToolResult) -> ToolResult {
+    let config = TruncationConfig::default();
+    let new_content = match result.content {
+        ToolResultContent::Text(text) => {
+            let out = truncate_tool_output(&text, &config);
+            if out.truncated {
+                tracing::debug!(
+                    truncated = true,
+                    original_len = text.len(),
+                    new_len = out.content.len(),
+                    "tool output truncated"
+                );
+            }
+            ToolResultContent::Text(out.content)
+        }
+        other => other,
+    };
+
+    ToolResult {
+        content: new_content,
+        ..result
     }
 }
 

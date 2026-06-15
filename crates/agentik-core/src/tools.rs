@@ -27,5 +27,6 @@ pub use agentik_sdk::types::{
 pub use builtins::{
     AbortTaskInput, AbortTaskTool, AttemptCompleteInput, AttemptCompleteTool, BashInput, BashTool,
     EditInput, EditTool, GlobInput, GlobTool, GrepInput, GrepTool, ReadInput, ReadTool,
-    WriteInput, WriteTool, default_toolset, lifecycle_registrations, primitive_registrations,
+    WebFetchInput, WebFetchTool, WriteInput, WriteTool, default_toolset,
+    lifecycle_registrations, primitive_registrations,
 };

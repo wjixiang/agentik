@@ -10,6 +10,7 @@ pub mod glob;
 pub mod grep;
 pub mod lifecycle;
 pub mod read;
+pub mod webfetch;
 pub mod write;
 
 pub use bash::{BashInput, BashTool};
@@ -21,13 +22,14 @@ pub use lifecycle::{
     lifecycle_registrations,
 };
 pub use read::{ReadInput, ReadTool};
+pub use webfetch::{WebFetchInput, WebFetchTool};
 pub use write::{WriteInput, WriteTool};
 
 use super::{ToolRegistration, Toolset};
 
-/// The foundational file/shell primitive tools: bash, read, write, edit,
-/// glob, grep. Wire these into an agent's toolset for basic filesystem
-/// and command capability.
+/// The foundational primitive tools: bash, read, write, edit, glob, grep,
+/// webfetch. Wire these into an agent's toolset for basic filesystem,
+/// command, and web-fetch capability.
 pub fn primitive_registrations() -> Vec<ToolRegistration> {
     vec![
         ToolRegistration::from(BashTool),
@@ -36,6 +38,7 @@ pub fn primitive_registrations() -> Vec<ToolRegistration> {
         ToolRegistration::from(EditTool),
         ToolRegistration::from(GlobTool),
         ToolRegistration::from(GrepTool),
+        ToolRegistration::from(WebFetchTool),
     ]
 }
 

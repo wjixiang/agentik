@@ -86,7 +86,7 @@ pub enum AgentPanelEvent {
 }
 
 impl AgentPanelState {
-    /// Apply a `ProcessEvent` from `ProcessManager` to the panel state.
+    /// Apply a `ProcessEvent` from `AgentManager` to the panel state.
     pub fn apply_process_event(&mut self, event: &ProcessEvent) {
         match event {
             ProcessEvent::Agent {

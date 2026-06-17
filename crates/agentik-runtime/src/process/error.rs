@@ -6,7 +6,7 @@ use agentik_core::error::AgentError;
 use crate::pool::PoolBuildError;
 use crate::registry::AgentBlueprintError;
 
-/// Errors produced by the [`ProcessManager`](super::ProcessManager).
+/// Errors produced by the [`AgentManager`](super::AgentManager).
 #[derive(Debug, Error)]
 pub enum ProcessError {
     #[error("agent process '{0}' not found")]

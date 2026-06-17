@@ -1,6 +1,6 @@
 //! Multi-agent process manager.
 //!
-//! [`ProcessManager`] spawns, monitors, and controls multiple [`Agent`](agentik_core::Agent)
+//! [`AgentManager`] spawns, monitors, and controls multiple [`Agent`](agentik_core::Agent)
 //! instances as independent tokio tasks.  Each agent gets its own event channel and
 //! cancellation token; the manager aggregates all events into a single
 //! [`broadcast::Receiver<ProcessEvent>`](ProcessEvent) stream and exposes lifecycle
@@ -58,11 +58,11 @@ struct ManagerEntry {
     cancel_token: CancellationToken,
     /// Handle to the forwarder task. Each forwarder awaits its own agent task,
     /// so awaiting this handle waits for *both* the agent task and the forwarder
-    /// to finish — used by [`shutdown`](ProcessManager::shutdown).
+    /// to finish — used by [`shutdown`](AgentManager::shutdown).
     task_handle: tokio::task::JoinHandle<ProcessExitStatus>,
 }
 
-// ── ProcessManager ────────────────────────────────────────────
+// ── AgentManager ────────────────────────────────────────────
 
 /// Multi-agent process manager.
 ///
@@ -77,7 +77,7 @@ struct ManagerEntry {
 /// # Example
 ///
 /// ```ignore
-/// let mut manager = ProcessManager::new();
+/// let mut manager = AgentManager::new();
 ///
 /// // Configure the shared model pool.
 /// manager.configure_pool(&model_config).await?;
@@ -93,7 +93,7 @@ struct ManagerEntry {
 /// manager.shutdown().await;
 /// ```
 #[derive(Clone)]
-pub struct ProcessManager {
+pub struct AgentManager {
     entries: Arc<tokio::sync::RwLock<HashMap<Uuid, ManagerEntry>>>,
     event_tx: broadcast::Sender<ProcessEvent>,
     /// Shared model-pool singleton.
@@ -102,13 +102,13 @@ pub struct ProcessManager {
     registry: Arc<AgentRegistry>,
 }
 
-impl Default for ProcessManager {
+impl Default for AgentManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ProcessManager {
+impl AgentManager {
     /// Create a new, empty process manager with an empty pool and registry.
     pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
@@ -441,6 +441,18 @@ impl ProcessManager {
     /// List all managed agent IDs.
     pub async fn agent_ids(&self) -> Vec<Uuid> {
         self.entries.read().await.keys().copied().collect()
+    }
+
+    /// Snapshot every managed agent as `(id, kind, status)`.
+    ///
+    /// Used by the control plane to report `list_agents` without leaking
+    /// internal entry types.
+    pub async fn snapshot(&self) -> Vec<(Uuid, String, AgentLifecycleStatus)> {
+        let entries = self.entries.read().await;
+        entries
+            .iter()
+            .map(|(id, e)| (*id, e.kind.name.clone(), *e.status_rx.borrow()))
+            .collect()
     }
 
     /// Return the number of managed agents.

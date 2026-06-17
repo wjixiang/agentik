@@ -29,6 +29,11 @@ pub async fn run(
 }
 
 /// Start the skill registry gRPC server bound to a pre-created listener.
+///
+/// Opens the SQLite store at `db_path`, imports `skill_dirs` into it, then
+/// serves. Use [`run_with_store`] instead when the caller already owns a
+/// shared store handle (e.g. the runtime, which shares the same store with
+/// the control plane).
 pub async fn run_with_listener(
     listener: tokio::net::TcpListener,
     db_path: PathBuf,
@@ -45,11 +50,32 @@ pub async fn run_with_listener(
         }
     }
 
+    run_with_store_impl(listener, store).await
+}
+
+/// Start the skill registry gRPC server on a pre-created listener, using a
+/// caller-provided store handle. The store is shared with whatever else the
+/// caller wired it into (e.g. the runtime control plane), so there is a
+/// single source of truth. Any directory imports must already have been done
+/// by the caller.
+pub async fn run_with_store(
+    listener: tokio::net::TcpListener,
+    store: Arc<SqliteSkillStore>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_with_store_impl(listener, store).await
+}
+
+async fn run_with_store_impl(
+    listener: tokio::net::TcpListener,
+    store: Arc<SqliteSkillStore>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let addr = listener.local_addr()?;
+    tracing::info!(%addr, "serving skill registry gRPC (shared store)");
+
     let registry = Arc::new(SkillRegistry::new(store.clone()));
     let change_rx = store.subscribe();
     let grpc_service = SkillRegistryGrpcService::new(registry, change_rx);
 
-    tracing::info!(%addr, "serving gRPC");
     let result = tonic::transport::Server::builder()
         .add_service(grpc_service.into_server())
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))

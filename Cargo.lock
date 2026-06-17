@@ -9,6 +9,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agentik-api"
+version = "0.1.0"
+dependencies = [
+ "agentik-types",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "agentik-app"
 version = "0.1.0"
 dependencies = [
@@ -30,9 +40,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentik-control-client"
+version = "0.1.0"
+dependencies = [
+ "agentik-api",
+ "agentik-control-proto",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "uuid",
+]
+
+[[package]]
+name = "agentik-control-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "agentik-core"
 version = "0.1.0"
 dependencies = [
+ "agentik-api",
  "agentik-proc",
  "agentik-sdk",
  "agentik-skill",
@@ -65,12 +99,17 @@ dependencies = [
 name = "agentik-runtime"
 version = "0.1.0"
 dependencies = [
+ "agentik-api",
+ "agentik-control-client",
+ "agentik-control-proto",
  "agentik-core",
  "agentik-sdk",
  "agentik-skill",
  "agentik-skill-client",
  "agentik-skill-server",
+ "agentik-tools",
  "async-trait",
+ "clap",
  "serde",
  "serde_json",
  "tempfile",
@@ -78,7 +117,9 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tonic",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -3319,6 +3360,7 @@ checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

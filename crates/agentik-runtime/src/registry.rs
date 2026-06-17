@@ -8,8 +8,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agentik_sdk::types::messages::ContentBlock;
-
 use agentik_skill::SkillTree;
 use agentik_core::tools::ToolProviderRegistry;
 use agentik_skill_client::SkillRegistryClient;
@@ -28,18 +26,9 @@ pub enum AgentBlueprintError {
 
 /// Options the frontend supplies when spawning an agent by kind.
 ///
-/// Contains only serialisable plain data — no `agentik-core` types.
-#[derive(Default, Clone, Debug)]
-pub struct AgentSpawnOpts {
-    /// Override the system-prompt identity line.
-    pub system_prompt_identity: Option<String>,
-
-    /// Override the system-prompt section (task-specific instructions).
-    pub system_prompt_section: Option<String>,
-
-    /// Optional initial user message injected right after spawn.
-    pub initial_message: Option<Vec<ContentBlock>>,
-}
+/// Defined in [`agentik_api`] and re-exported here so historical
+/// `agentik_runtime::AgentSpawnOpts` paths keep resolving.
+pub use agentik_api::AgentSpawnOpts;
 
 // ── AgentBlueprint ────────────────────────────────────────────────────
 
@@ -183,7 +172,7 @@ impl AgentBlueprint {
 ///
 /// The host registers [`AgentBlueprint`] instances at startup.
 /// The runtime looks up kinds by name when the frontend calls
-/// [`spawn_by_kind`](crate::ProcessManager::spawn_by_kind).
+/// [`spawn_by_kind`](crate::AgentManager::spawn_by_kind).
 #[derive(Default)]
 pub struct AgentRegistry {
     kinds: std::sync::RwLock<HashMap<String, Arc<AgentBlueprint>>>,

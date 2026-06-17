@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use agentik_runtime::{
-    AgentBlueprint, AgentRegistry, ProcessManager, Runtime, RuntimeConfig,
+    AgentBlueprint, AgentRegistry, AgentManager, Runtime, RuntimeConfig,
 };
 
 use tempfile::TempDir;
@@ -57,7 +57,7 @@ async fn test_runtime_headless() {
     let registry: &AgentRegistry = runtime.registry();
     assert!(registry.list().is_empty());
 
-    let _pm: &ProcessManager = runtime.process_manager();
+    let _pm: &AgentManager = runtime.process_manager();
 
     // Event stream is open.
     let _rx = runtime.events();

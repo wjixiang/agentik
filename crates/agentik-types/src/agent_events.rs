@@ -11,7 +11,7 @@ use crate::{ContentBlockDelta, Message, MessageStreamEvent, StopReason};
 ///
 /// Consumers subscribe to a single `broadcast::Receiver<AgentEvent>` and filter
 /// on the variants they care about.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AgentEvent {
     // ── Real-time streaming deltas (translated from MessageStreamEvent) ──
 
@@ -67,7 +67,7 @@ pub enum AgentEvent {
 
 /// Coarse-grained kind of a content block, sufficient for UI observation
 /// without exposing the full `ContentBlock` details.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ContentBlockKind {
     Text,
     Thinking,

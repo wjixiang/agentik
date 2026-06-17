@@ -66,7 +66,7 @@ impl PoolOwner {
     /// replacing the previous pool.  Returns the new `Arc<ModelPool>`.
     ///
     /// **Note:** existing agents still reference the *old* `Arc<ModelPool>`.
-    /// The caller (typically `ProcessManager::reconfigure_pool`) is
+    /// The caller (typically `AgentManager::reconfigure_pool`) is
     /// responsible for rebuilding agents if they should use the new pool.
     pub async fn reconfigure(
         &self,

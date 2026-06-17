@@ -3,7 +3,7 @@
 //! [`Runtime`] is the single entry point for the host binary. It:
 //! 1. Starts an embedded skill registry gRPC server as a background tokio task.
 //! 2. Connects a [`SkillRegistryClient`] to that server.
-//! 3. Owns a [`ProcessManager`] (which in turn owns the agent registry and model pool).
+//! 3. Owns a [`AgentManager`] (which in turn owns the agent registry and model pool).
 //! 4. Provides graceful shutdown in the correct order: agents first, then skill server.
 
 use std::net::SocketAddr;
@@ -11,11 +11,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agentik_skill_server::SqliteSkillStore;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
 use crate::pool::PoolOwner;
-use crate::process::{ProcessEvent, ProcessExitStatus, ProcessManager};
+use crate::process::{ProcessEvent, ProcessExitStatus, AgentManager};
 use crate::registry::AgentRegistry;
 
 // ── Error ───────────────────────────────────────────────────────
@@ -62,7 +63,7 @@ pub struct RuntimeConfig {
 
     /// Initial model configuration for the pool.
     /// Can be `None` to defer pool configuration (call
-    /// `ProcessManager::configure_pool` later).
+    /// `AgentManager::configure_pool` later).
     pub model_config: Option<crate::ModelConfig>,
 }
 
@@ -114,8 +115,13 @@ pub struct Runtime {
     /// Connected skill client (for blueprint `activate_skill` support).
     skill_client: Option<Arc<tokio::sync::Mutex<agentik_skill_client::SkillRegistryClient>>>,
 
+    /// The shared skill store. `None` if no skill server is configured.
+    /// Shared between the skill server task and the control plane so there is
+    /// a single source of truth for skills.
+    skill_store: Option<Arc<SqliteSkillStore>>,
+
     /// The multi-agent process manager.
-    process_manager: ProcessManager,
+    process_manager: AgentManager,
 }
 
 /// Maximum retries and delay when connecting to the embedded skill server.
@@ -129,13 +135,13 @@ impl Runtime {
     /// 1. Bind a TCP listener for the skill server (if configured).
     /// 2. Start the skill server as a background tokio task.
     /// 3. Connect a `SkillRegistryClient` to the skill server.
-    /// 4. Create the `ProcessManager` and configure the pool (if provided).
+    /// 4. Create the `AgentManager` and configure the pool (if provided).
     pub async fn new(config: RuntimeConfig) -> Result<Self, RuntimeError> {
         let registry = Arc::new(AgentRegistry::new());
         let pool = Arc::new(PoolOwner::new());
 
         // ── Step 1-3: Skill server (optional) ──
-        let (skill_server_addr, skill_server_handle, skill_client) =
+        let (skill_server_addr, skill_server_handle, skill_client, skill_store) =
             if let Some(addr) = config.skill_server_addr {
                 let listener = TcpListener::bind(addr).await.map_err(RuntimeError::Bind)?;
                 let bound_addr = listener.local_addr().map_err(RuntimeError::Bind)?;
@@ -146,10 +152,26 @@ impl Runtime {
                     .db_path
                     .clone()
                     .ok_or_else(|| RuntimeError::SkillServer("db_path required when starting embedded skill server".into()))?;
-                let skill_dirs = config.skill_dirs.clone();
+
+                // Open the store here and share it with the control plane, so
+                // there is a single source of truth. Initial dir imports are
+                // done before handing the store to the server task.
+                let store = Arc::new(
+                    SqliteSkillStore::open(db_path)
+                        .await
+                        .map_err(RuntimeError::SkillStore)?,
+                );
+                for dir in &config.skill_dirs {
+                    match store.import_from_dir(dir).await {
+                        Ok(n) => tracing::info!(dir = %dir.display(), count = n, "imported skills from dir"),
+                        Err(e) => tracing::warn!(dir = %dir.display(), error = %e, "skill dir import failed"),
+                    }
+                }
+
+                let store_for_server = store.clone();
                 let handle = tokio::spawn(async move {
                     if let Err(e) =
-                        agentik_skill_server::run_with_listener(listener, db_path, skill_dirs).await
+                        agentik_skill_server::run_with_store(listener, store_for_server).await
                     {
                         tracing::error!(error = %e, "skill server error");
                     }
@@ -159,13 +181,13 @@ impl Runtime {
                 let client_addr = format!("http://{bound_addr}");
                 let client = connect_with_retry(&client_addr).await?;
 
-                (Some(bound_addr), Some(handle), Some(Arc::new(tokio::sync::Mutex::new(client))))
+                (Some(bound_addr), Some(handle), Some(Arc::new(tokio::sync::Mutex::new(client))), Some(store))
             } else {
-                (None, None, None)
+                (None, None, None, None)
             };
 
         // ── Step 4: Process manager ──
-        let process_manager = ProcessManager::with_registry_and_pool(registry, pool);
+        let process_manager = AgentManager::with_registry_and_pool(registry, pool);
 
         // Configure pool if provided.
         if let Some(ref model_config) = config.model_config {
@@ -179,6 +201,7 @@ impl Runtime {
             skill_server_addr,
             skill_server_handle,
             skill_client,
+            skill_store,
             process_manager,
         })
     }
@@ -192,7 +215,7 @@ impl Runtime {
     }
 
     /// Access the process manager for lifecycle control (spawn, start, stop, etc.).
-    pub fn process_manager(&self) -> &ProcessManager {
+    pub fn process_manager(&self) -> &AgentManager {
         &self.process_manager
     }
 
@@ -210,12 +233,18 @@ impl Runtime {
         self.skill_client.as_ref()
     }
 
+    /// The shared skill store, if a skill server is configured. Shared with the
+    /// control plane so skills have a single source of truth.
+    pub fn skill_store(&self) -> Option<Arc<SqliteSkillStore>> {
+        self.skill_store.clone()
+    }
+
     /// Subscribe to the aggregated event stream for all agents.
     pub fn events(&self) -> tokio::sync::broadcast::Receiver<ProcessEvent> {
         self.process_manager.events()
     }
 
-    /// Configure the model pool. See [`ProcessManager::configure_pool`].
+    /// Configure the model pool. See [`AgentManager::configure_pool`].
     pub async fn configure_pool(
         &self,
         cfg: &crate::ModelConfig,

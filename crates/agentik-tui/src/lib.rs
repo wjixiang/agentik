@@ -1,6 +1,6 @@
 //! Reusable TUI panels for visualizing:
 //!
-//! - sub-agents managed by `agentik_runtime::ProcessManager` — see
+//! - sub-agents managed by `agentik_runtime::AgentManager` — see
 //!   [`AgentPanelState`] and [`render_agent_panel`].
 //! - a streaming chat conversation history — see
 //!   [`ChatPanelState`], [`ChatMessage`], and [`render_chat_panel`].

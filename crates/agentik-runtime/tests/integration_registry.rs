@@ -108,6 +108,6 @@ async fn test_blueprint_build_agent_from_registry() {
 #[ignore]
 async fn test_process_manager_spawn_and_start() {
     // TODO: Configure MockApiClient to return a streaming response that triggers
-    // AttemptComplete, then verify the full ProcessManager lifecycle:
+    // AttemptComplete, then verify the full AgentManager lifecycle:
     //   spawn_by_kind() → start() → collect ProcessEvent::Done → shutdown()
 }

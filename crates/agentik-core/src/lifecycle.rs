@@ -1,16 +1,15 @@
 use thiserror::Error;
 
+/// Agent lifecycle status.
+///
+/// Defined in [`agentik_api`] and re-exported here so historical
+/// `agentik_core::lifecycle::AgentLifecycleStatus` paths keep resolving.
+pub use agentik_api::AgentLifecycleStatus;
+
 #[derive(Debug, Error)]
 pub enum AgentLifecycleError {
     #[error("{0}")]
     OtherLifecycleError(String),
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum AgentLifecycleStatus {
-    IDLE,
-    RUNNING,
-    ABORTED,
 }
 
 pub struct AgentLifecycle {

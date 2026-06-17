@@ -18,7 +18,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use uuid::Uuid;
 
-use agentik_runtime::{AgentEvent, AgentSpawnOpts, ModelConfig, ProcessEvent, ProcessManager, Runtime, RuntimeConfig};
+use agentik_runtime::{AgentEvent, AgentSpawnOpts, ModelConfig, ProcessEvent, AgentManager, Runtime, RuntimeConfig};
 use agentik_sdk::types::messages::ContentBlock;
 use agentik_tui::{
     append_streaming_assistant, append_streaming_thinking, finalize_streaming,
@@ -34,7 +34,7 @@ const SETTINGS_FILE: &str = "data/settings.json";
 
 /// The application state held by the main loop.
 struct App {
-    manager: ProcessManager,
+    manager: AgentManager,
     settings: SettingsPanelState,
     chat: ChatPanelState<String>,
     /// Cached pool model count (updated on configure/reconfigure).
@@ -50,7 +50,7 @@ struct App {
 }
 
 impl App {
-    fn new(manager: ProcessManager, initial_config: &ModelConfig, pool_model_count: usize) -> Self {
+    fn new(manager: AgentManager, initial_config: &ModelConfig, pool_model_count: usize) -> Self {
         let event_rx = manager.events();
         App {
             manager,

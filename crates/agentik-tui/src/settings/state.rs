@@ -3,7 +3,7 @@
 //! The panel holds in-memory copies of providers and pool entries.
 //! When the host calls [`configured_model_config`](Self::configured_model_config),
 //! it gets a [`ModelConfig`] ready to pass to
-//! [`ProcessManager::configure_pool`](agentik_runtime::ProcessManager::configure_pool).
+//! [`AgentManager::configure_pool`](agentik_runtime::AgentManager::configure_pool).
 
 use agentik_runtime::{ModelConfig, PoolEntry, ProviderConfig};
 use agentik_runtime::provider_factory;

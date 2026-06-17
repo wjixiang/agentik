@@ -299,6 +299,30 @@ impl SqliteSkillStore {
             skill_name: name,
         });
     }
+
+    /// Rebuild the in-memory index if it has been invalidated.
+    async fn ensure_tree_valid(&self) -> SkillStoreResult<()> {
+        if !self.tree_valid.load(Ordering::Acquire) {
+            self.rebuild_index().await?;
+        }
+        Ok(())
+    }
+
+    /// Return the full skill tree rebuilt from the store, with an
+    /// auto-generated children summary appended to the root skill's body
+    /// (mirroring `agentik_skill::load_skill_tree_from_dirs`). Returns a
+    /// cloned snapshot.
+    pub async fn skill_tree(&self) -> SkillStoreResult<SkillTree> {
+        self.ensure_tree_valid().await?;
+        let mut tree = self.tree.read().await.clone();
+        let children_summary = tree.children_summary();
+        if let Some(ref mut root) = tree.root {
+            if !children_summary.is_empty() {
+                root.skill.body.push_str(&children_summary);
+            }
+        }
+        Ok(tree)
+    }
 }
 
 #[async_trait]

@@ -4,15 +4,17 @@
 //! frontend (`agentik-tui`).  It exposes:
 //!
 //! - A unified [`Runtime`] portal that owns the embedded skill server
-//!   and the agent [`ProcessManager`].
+//!   and the agent [`AgentManager`].
 //! - A shared [`ModelPool`] singleton via [`PoolOwner`](pool::PoolOwner),
 //!   configured from declarative [`ModelConfig`] types.
 //! - An [`AgentRegistry`] of named agent kinds (registered by host code),
 //!   so the frontend can spawn agents by name without touching
 //!   `agentik-core` / `agentik-sdk` types.
-//! - [`ProcessManager`] for lifecycle control (start / stop / restart /
+//! - [`AgentManager`] for lifecycle control (start / stop / restart /
 //!   reconfigure-pool) and event observation.
 
+pub mod control;
+pub mod kinds;
 pub mod model_config;
 pub mod pool;
 pub mod process;
@@ -23,7 +25,7 @@ pub mod runtime;
 // ── Re-exports — frontend-facing surface ─────────────────────
 
 // Process manager (the main public API).
-pub use process::{ProcessError, ProcessEvent, ProcessExitStatus, ProcessManager};
+pub use process::{ProcessError, ProcessEvent, ProcessExitStatus, AgentManager};
 
 // Declarative model configuration (pure serde data — no core/sdk types).
 pub use model_config::{ModelConfig, PoolEntry, ProviderConfig};

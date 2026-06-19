@@ -12,8 +12,6 @@ use std::path::PathBuf;
 pub struct DaemonInfo {
     /// Control-plane gRPC address (e.g. `127.0.0.1:54321`).
     pub control_addr: SocketAddr,
-    /// Embedded skill-registry gRPC address, if running.
-    pub skill_addr: Option<SocketAddr>,
     /// OS process id of the daemon.
     pub pid: u32,
     /// Unix epoch seconds at which the daemon started.

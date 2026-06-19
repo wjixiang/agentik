@@ -163,19 +163,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Create runtime ──────────────────────────────
     let runtime = rt.block_on(async {
-        let config = RuntimeConfig::with_embedded_skill_server(vec![
-            std::path::PathBuf::from("skills"),
-        ])
-        .with_model_config(initial_config.clone());
+        let config = RuntimeConfig::headless()
+            .with_model_config(initial_config.clone());
 
         let r = Runtime::new(config).await?;
         r.registry().register(kinds::coder_kind());
         Ok::<_, agentik_runtime::RuntimeError>(r)
     })?;
-
-    if let Some(addr) = runtime.skill_server_addr() {
-        tracing::info!("Skill server embedded at {addr}");
-    }
 
     let manager = runtime.process_manager().clone();
     let pool_model_count = rt.block_on(manager.pool_model_names()).len();

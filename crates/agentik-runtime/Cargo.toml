@@ -11,9 +11,6 @@ agentik-core = { path = "../agentik-core" }
 agentik-types = { path = "../agentik-types" }
 agentik-api = { path = "../agentik-api", features = ["schema"] }
 agentik-control-client = { path = "../agentik-control-client" }
-agentik-skill = { path = "../agentik-skill" }
-agentik-skill-client = { path = "../agentik-skill-client" }
-agentik-skill-server = { path = "../agentik-skill-server" }
 agentik-tools = { path = "../agentik-tools" }
 agentik-sdk = { path = "../agentik-sdk" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "signal"] }

@@ -1,19 +1,16 @@
 //! REST + SSE control-plane HTTP server.
 //!
 //! [`router`] builds the axum app exposing the agent lifecycle / observation
-//! / skill-tree API as JSON-over-HTTP, with two SSE endpoints for the event
-//! streams (`/events`, `/skills/events`). Replaces the former gRPC control
-//! plane; the internal skill registry gRPC (used by agents for `activate_skill`)
-//! is unaffected.
+//! API as JSON-over-HTTP, with an SSE endpoint for the event stream
+//! (`/events`).
 //!
 //! Bodies use the serde wire types in `agentik-api` directly — no `*_json`
 //! string wrapping.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path as AxumPath, Query, State},
+    extract::{Path as AxumPath, State},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -32,22 +29,14 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use agentik_api::{
     AgentLifecycleStatus, AgentSpawnOpts, ContentBlock, ModelConfig, PoolEntry, ProcessEvent,
-    ProcessExitStatus, ProviderConfig, SkillChangeNotificationWire, SkillChangeWire,
-    SkillReferenceWire, SkillTreeNodeWire, SkillWire,
+    ProcessExitStatus, ProviderConfig,
 };
-use agentik_skill::{Skill, SkillTreeNode};
-use agentik_skill_client::SkillRegistryClient;
-use agentik_skill_server::store::SkillStore as _;
-use agentik_skill_server::{SkillChangeType, SqliteSkillStore};
 
 // `ImageSource` nests under `ContentBlock`; pull it in for the OpenAPI
 // `components(schemas(...))` list.
 #[allow(unused_imports)]
 use agentik_types::ImageSource;
 
-use tokio::sync::Mutex;
-
-use crate::kinds;
 use crate::process::AgentManager;
 
 /// Shared state for all handlers.
@@ -58,46 +47,19 @@ pub struct HttpState {
 
 struct HttpStateInner {
     pm: AgentManager,
-    store: Option<Arc<SqliteSkillStore>>,
-    skill_client: Option<Arc<Mutex<SkillRegistryClient>>>,
     shutdown: CancellationToken,
 }
 
 impl HttpState {
     pub fn new(
         pm: AgentManager,
-        store: Option<Arc<SqliteSkillStore>>,
-        skill_client: Option<Arc<Mutex<SkillRegistryClient>>>,
         shutdown: CancellationToken,
     ) -> Self {
         Self {
             inner: Arc::new(HttpStateInner {
                 pm,
-                store,
-                skill_client,
                 shutdown,
             }),
-        }
-    }
-
-    fn store(&self) -> Result<&Arc<SqliteSkillStore>, (StatusCode, String)> {
-        self.inner
-            .store
-            .as_ref()
-            .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "skill store not configured".into()))
-    }
-
-    /// Refresh the built-in `coder` kind from the current store contents, so
-    /// that agents spawned after a skill import see the new tree.
-    async fn refresh_coder_kind(&self, store: &Arc<SqliteSkillStore>) {
-        match kinds::coder_kind(store, self.inner.skill_client.clone()).await {
-            Ok(blueprint) => {
-                self.inner.pm.registry().register(blueprint);
-                tracing::info!("refreshed 'coder' kind after skill change");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to refresh 'coder' kind after skill change");
-            }
         }
     }
 }
@@ -110,30 +72,25 @@ impl HttpState {
         title = "agentik control plane",
         version = "0.1.0",
         description = "REST + SSE API for the agentik runtime daemon \
-                       (agent lifecycle, model pool, skill-tree management).",
+                       (agent lifecycle, model pool).",
     ),
     paths(
         health, shutdown,
         spawn_agent, list_agents, start_agent, stop_agent, restart_agent,
         inject_message, get_status, stream_events,
         pool_models, configure_pool, list_kinds,
-        list_skills, skill_tree, get_skill, reload_skill, import_skills,
-        export_skills, watch_skills,
     ),
     components(schemas(
-        SpawnAgentBody, AgentIdBody, InjectMessageBody, DirBody, ImportResultBody,
-        AckBody, StatusBody, AgentInfoBody, SkillListQuery, ReloadResultBody,
+        SpawnAgentBody, AgentIdBody, InjectMessageBody,
+        AckBody, StatusBody, AgentInfoBody,
         AgentLifecycleStatus, AgentSpawnOpts, ContentBlock, ImageSource,
         ModelConfig, ProviderConfig, PoolEntry,
-        SkillWire, SkillTreeNodeWire, SkillReferenceWire,
-        SkillChangeWire, SkillChangeNotificationWire,
         ProcessEvent, ProcessExitStatus,
     )),
     tags(
         (name = "system", description = "health / shutdown"),
         (name = "agents", description = "agent lifecycle & observation"),
         (name = "pool",   description = "model pool / kinds"),
-        (name = "skills", description = "skill-tree management"),
     ),
 )]
 pub struct ApiDoc;
@@ -163,14 +120,6 @@ pub fn router(state: HttpState) -> Router {
         .route("/api/v1/kinds", get(list_kinds))
         // ── events (SSE) ──
         .route("/api/v1/events", get(stream_events))
-        // ── skills ──
-        .route("/api/v1/skills", get(list_skills))
-        .route("/api/v1/skills/tree", get(skill_tree))
-        .route("/api/v1/skills/events", get(watch_skills))
-        .route("/api/v1/skills/{name}", get(get_skill))
-        .route("/api/v1/skills/{name}/reload", post(reload_skill))
-        .route("/api/v1/skills/import", post(import_skills))
-        .route("/api/v1/skills/export", post(export_skills))
         .layer(cors)
         .with_state(state)
 }
@@ -194,18 +143,6 @@ struct InjectMessageBody {
     content: Vec<ContentBlock>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-struct DirBody {
-    dir: String,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-struct ImportResultBody {
-    count: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 struct AckBody {
     ok: bool,
@@ -216,23 +153,6 @@ struct AckBody {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 struct StatusBody {
     status: AgentLifecycleStatus,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-struct SkillListQuery {
-    #[serde(default)]
-    user_invocable_only: bool,
-    #[serde(default)]
-    model_invocable_only: bool,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-struct ReloadResultBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    skill: Option<SkillWire>,
-    not_changed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
 }
 
 fn ack(ok: bool, error: impl Into<String>) -> AckBody {
@@ -474,222 +394,6 @@ async fn stream_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-// ── Skill handlers ──────────────────────────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/api/v1/skills",
-    params(
-        ("user_invocable_only" = Option<bool>, Query, description = "filter to user-invocable skills"),
-        ("model_invocable_only" = Option<bool>, Query, description = "filter to model-invocable skills"),
-    ),
-    responses(
-        (status = 200, body = Vec<SkillWire>),
-        (status = 503, body = String, description = "skill store not configured"),
-    ),
-    tag = "skills",
-)]
-async fn list_skills(
-    State(state): State<HttpState>,
-    Query(q): Query<SkillListQuery>,
-) -> Result<Json<Vec<SkillWire>>, (StatusCode, String)> {
-    let store = state.store()?.clone();
-    let tree = store
-        .skill_tree()
-        .await
-        .map_err(|e| err_status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut wires = Vec::new();
-    flatten_tree(&tree, &mut wires);
-    let filtered: Vec<SkillWire> = wires
-        .into_iter()
-        .filter(|w| !q.user_invocable_only || w.user_invocable)
-        .filter(|w| !q.model_invocable_only || w.model_invocable)
-        .collect();
-    Ok(Json(filtered))
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/v1/skills/{name}",
-    params(("name" = String, Path, description = "skill name or alias")),
-    responses(
-        (status = 200, body = SkillWire),
-        (status = 404, body = String, description = "skill not found"),
-        (status = 503, body = String, description = "skill store not configured"),
-    ),
-    tag = "skills",
-)]
-async fn get_skill(
-    State(state): State<HttpState>,
-    AxumPath(name): AxumPath<String>,
-) -> Result<Json<SkillWire>, (StatusCode, String)> {
-    let store = state.store()?;
-    let skill = store
-        .get(&name)
-        .await
-        .map_err(|e| err_status(StatusCode::NOT_FOUND, e))?;
-    let dotpath = store
-        .skill_tree()
-        .await
-        .ok()
-        .and_then(|t| find_dotpath(&t, &skill.metadata.name))
-        .unwrap_or_default();
-    Ok(Json(skill_to_wire(&dotpath, &skill)))
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/v1/skills/tree",
-    responses(
-        (status = 200, body = SkillTreeNodeWire),
-        (status = 404, body = String, description = "skill tree is empty"),
-        (status = 503, body = String, description = "skill store not configured"),
-    ),
-    tag = "skills",
-)]
-async fn skill_tree(State(state): State<HttpState>) -> Result<Json<SkillTreeNodeWire>, (StatusCode, String)> {
-    let store = state.store()?;
-    let tree = store
-        .skill_tree()
-        .await
-        .map_err(|e| err_status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let root = tree
-        .root
-        .as_ref()
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "skill tree is empty".to_string()))?;
-    Ok(Json(tree_to_wire(root)))
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/skills/{name}/reload",
-    params(("name" = String, Path, description = "skill name")),
-    responses(
-        (status = 200, body = ReloadResultBody),
-        (status = 503, body = String, description = "skill store not configured"),
-    ),
-    tag = "skills",
-)]
-async fn reload_skill(
-    State(state): State<HttpState>,
-    AxumPath(name): AxumPath<String>,
-) -> Result<Json<ReloadResultBody>, (StatusCode, String)> {
-    let store = state.store()?;
-    match store.reload(&name).await {
-        Ok(Some(skill)) => {
-            let dotpath = store
-                .skill_tree()
-                .await
-                .ok()
-                .and_then(|t| find_dotpath(&t, &skill.metadata.name))
-                .unwrap_or_default();
-            Ok(Json(ReloadResultBody {
-                skill: Some(skill_to_wire(&dotpath, &skill)),
-                not_changed: false,
-                error: None,
-            }))
-        }
-        Ok(None) => Ok(Json(ReloadResultBody {
-            skill: None,
-            not_changed: true,
-            error: None,
-        })),
-        Err(e) => Ok(Json(ReloadResultBody {
-            skill: None,
-            not_changed: false,
-            error: Some(e.to_string()),
-        })),
-    }
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/skills/import",
-    request_body = DirBody,
-    responses(
-        (status = 200, body = ImportResultBody, description = "imported count (refreshes the coder kind)"),
-        (status = 503, body = String, description = "skill store not configured"),
-    ),
-    tag = "skills",
-)]
-async fn import_skills(
-    State(state): State<HttpState>,
-    Json(body): Json<DirBody>,
-) -> Result<Json<ImportResultBody>, (StatusCode, String)> {
-    let store = state.store()?.clone();
-    match store.import_from_dir(Path::new(&body.dir)).await {
-        Ok(count) => {
-            state.refresh_coder_kind(&store).await;
-            Ok(Json(ImportResultBody {
-                count: count as u32,
-                error: None,
-            }))
-        }
-        Err(e) => Ok(Json(ImportResultBody {
-            count: 0,
-            error: Some(e.to_string()),
-        })),
-    }
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/skills/export",
-    request_body = DirBody,
-    responses(
-        (status = 200, body = ImportResultBody, description = "exported count"),
-        (status = 503, body = String, description = "skill store not configured"),
-    ),
-    tag = "skills",
-)]
-async fn export_skills(
-    State(state): State<HttpState>,
-    Json(body): Json<DirBody>,
-) -> Result<Json<ImportResultBody>, (StatusCode, String)> {
-    let store = state.store()?;
-    match store.export_to_dir(Path::new(&body.dir)).await {
-        Ok(count) => Ok(Json(ImportResultBody {
-            count: count as u32,
-            error: None,
-        })),
-        Err(e) => Ok(Json(ImportResultBody {
-            count: 0,
-            error: Some(e.to_string()),
-        })),
-    }
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/v1/skills/events",
-    responses((status = 200, content_type = "text/event-stream",
-        description = "SSE stream of skill-change notifications; each `data:` line is a JSON SkillChangeNotificationWire")),
-    tag = "skills",
-)]
-async fn watch_skills(
-    State(state): State<HttpState>,
-) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
-{
-    let store = state.store()?;
-    let rx = store.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
-        result.ok().map(|notif| {
-            let change = match notif.change_type {
-                SkillChangeType::Added => SkillChangeWire::Added,
-                SkillChangeType::Modified => SkillChangeWire::Modified,
-                SkillChangeType::Removed => SkillChangeWire::Removed,
-            };
-            let wire = SkillChangeNotificationWire {
-                change_type: change,
-                skill_name: notif.skill_name,
-            };
-            let data = serde_json::to_string(&wire).unwrap_or_default();
-            Ok::<_, std::convert::Infallible>(Event::default().data(data))
-        })
-    });
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
 // ── Helpers ─────────────────────────────────────────────────────
 
 fn parse_id(s: &str) -> Result<uuid::Uuid, (StatusCode, String)> {
@@ -701,67 +405,4 @@ fn to_ack(res: Result<(), crate::process::ProcessError>) -> AckBody {
         Ok(()) => ok_ack(),
         Err(e) => ack(false, e.to_string()),
     }
-}
-
-// ── Skill ↔ wire mapping ────────────────────────────────────────
-
-fn skill_to_wire(dotpath: &str, skill: &Skill) -> SkillWire {
-    SkillWire {
-        dotpath: dotpath.to_string(),
-        name: skill.metadata.name.clone(),
-        description: skill.metadata.description.clone(),
-        aliases: skill.metadata.aliases.clone(),
-        when_to_use: skill.metadata.when_to_use.clone(),
-        argument_hint: skill.metadata.argument_hint.clone(),
-        user_invocable: skill.metadata.user_invocable,
-        model_invocable: skill.metadata.model_invocable,
-        allowed_tools: skill.policy.allowed_tools.iter().cloned().collect(),
-        body: skill.body.clone(),
-        references: skill
-            .references
-            .iter()
-            .map(|r| SkillReferenceWire {
-                name: r.name.clone(),
-                content: r.content.clone(),
-            })
-            .collect(),
-        activation_paths: skill.activation_paths.clone(),
-    }
-}
-
-fn tree_to_wire(node: &SkillTreeNode) -> SkillTreeNodeWire {
-    SkillTreeNodeWire {
-        skill: skill_to_wire(&node.dotpath, &node.skill),
-        dotpath: node.dotpath.clone(),
-        children: node.children.iter().map(tree_to_wire).collect(),
-    }
-}
-
-fn flatten_tree(tree: &agentik_skill::SkillTree, out: &mut Vec<SkillWire>) {
-    if let Some(root) = &tree.root {
-        flatten_node(root, out);
-    }
-}
-
-fn flatten_node(node: &SkillTreeNode, out: &mut Vec<SkillWire>) {
-    out.push(skill_to_wire(&node.dotpath, &node.skill));
-    for child in &node.children {
-        flatten_node(child, out);
-    }
-}
-
-fn find_dotpath(tree: &agentik_skill::SkillTree, name: &str) -> Option<String> {
-    tree.root.as_ref().and_then(|n| find_dotpath_node(n, name))
-}
-
-fn find_dotpath_node(node: &SkillTreeNode, name: &str) -> Option<String> {
-    if node.skill.metadata.name == name {
-        return Some(node.dotpath.clone());
-    }
-    for child in &node.children {
-        if let Some(dp) = find_dotpath_node(child, name) {
-            return Some(dp);
-        }
-    }
-    None
 }

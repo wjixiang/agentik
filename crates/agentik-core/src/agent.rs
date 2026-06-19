@@ -29,9 +29,8 @@ use crate::{
     lifecycle::AgentLifecycle,
     memory::Memory,
     storage::{AgentSnapshot, AgentSnapshotStorage},
-    tools::{SkillActivationState, ToolRegistration, Toolset},
+    tools::{ToolRegistration, Toolset},
 };
-use agentik_skill::Skill;
 
 #[derive(Clone)]
 pub struct AgentConfig {
@@ -64,12 +63,6 @@ pub struct Agent {
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<agentik_sdk::types::AgentUiEvent>>,
     /// Currently selected model name. If None, falls back to round-robin.
     pub(crate) current_model_name: Option<String>,
-    /// Skill activation path. Last element is the currently active (leaf) skill.
-    /// Empty means no skill tree loaded (backward compatible).
-    /// [root] means root skill active. [root, child] means child is active.
-    pub(crate) active_skill_path: Vec<Skill>,
-    /// Shared state for skill activation (SkillToolImpl writes, handle_effect reads).
-    pub(crate) skill_activation_state: Option<SkillActivationState>,
 }
 
 impl Agent {
@@ -283,11 +276,7 @@ impl Agent {
             });
         }
 
-        let allowed = self
-            .active_skill_path
-            .last()
-            .and_then(|s| s.allowed_tools());
-        let tool_results = self.toolset.execute(&toolcalls, allowed.as_deref()).await?;
+        let tool_results = self.toolset.execute(&toolcalls, None).await?;
         tracing::debug!(?tool_results, "tool execution results");
 
         for tr in &tool_results {
@@ -340,35 +329,6 @@ impl Agent {
 
     /// Apply agent-level effects declared by tool results (e.g. lifecycle transitions).
     async fn handle_effect(&mut self, tool_results: &[ToolCallResponse]) {
-        // Check for pending skill activation from SkillToolImpl.
-        if let Some(ref state) = self.skill_activation_state {
-            if let Some(new_skill) = state.take().await {
-                tracing::info!(skill_name = %new_skill.metadata.name, "skill activated");
-
-                // Determine if the new skill is a child of the current leaf.
-                let current_dotpath = self
-                    .active_skill_path
-                    .last()
-                    .map(|s| s.metadata.name.as_str());
-                let is_child = new_skill
-                    .metadata
-                    .aliases
-                    .iter()
-                    .any(|a| current_dotpath == Some(a.as_str()));
-
-                if is_child && current_dotpath.is_some() {
-                    // Progressive disclosure: push onto path.
-                    self.active_skill_path.push(new_skill);
-                } else {
-                    // Skill switch or first activation: rebuild path from root.
-                    self.active_skill_path.retain(|s| {
-                        s.metadata.name == "root" || s.metadata.aliases.contains(&"root".to_string())
-                    });
-                    self.active_skill_path.push(new_skill);
-                }
-            }
-        }
-
         let effects: Vec<ToolEffect> = tool_results
             .iter()
             .flat_map(|ts| ts.effects.clone())
@@ -380,9 +340,6 @@ impl Agent {
             }
             ToolEffect::Abort => {
                 self.lifecycle.set_aborted();
-            }
-            ToolEffect::ActivateSkill { .. } => {
-                // Handled via skill_activation_state above; no-op here.
             }
         });
     }
@@ -443,26 +400,10 @@ impl Agent {
             return Err(AgentError::CompactionRebuild);
         }
 
-        // Progressive tool disclosure: filter tool definitions sent to the LLM
-        // based on the current skill's allowed_tools. The LLM only sees tools
-        // that the active skill permits.
         let all_tools = self.toolset.tools();
-        let visible_tools: Vec<_> = match self.active_skill_path.last() {
-            Some(skill) => {
-                let allowed = skill.allowed_tools();
-                match allowed {
-                    Some(names) => all_tools
-                        .into_iter()
-                        .filter(|t| names.contains(&t.name))
-                        .collect(),
-                    None => all_tools,
-                }
-            }
-            None => all_tools,
-        };
 
         let mut stream = model
-            .request_stream(context, visible_tools.as_ref())
+            .request_stream(context, &all_tools)
             .await?;
 
         while let Some(event) = stream.next().await {

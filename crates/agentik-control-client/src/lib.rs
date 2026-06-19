@@ -17,5 +17,4 @@ pub use discovery::connect_to_daemon;
 pub use agentik_api::{
     AgentEvent, AgentLifecycleStatus, AgentSpawnOpts, AgentUiEvent, ContentBlock, ContentBlockKind,
     DaemonInfo, Message, ModelConfig, PoolEntry, ProcessEvent, ProcessExitStatus, ProviderConfig,
-    SkillChangeNotificationWire, SkillReferenceWire, SkillTreeNodeWire, SkillWire,
 };

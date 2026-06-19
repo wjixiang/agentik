@@ -32,5 +32,4 @@ pub use agentik_sdk::types::{
 pub use builtins::{
     AbortTaskInput, AbortTaskTool, AttemptCompleteInput, AttemptCompleteTool,
     lifecycle_registrations,
-    SkillActivationState, skill_registration,
 };

@@ -9,7 +9,6 @@ description = "Host binary wiring agentik-runtime + agentik-tui."
 [dependencies]
 agentik-core = { path = "../agentik-core" }
 agentik-sdk = { path = "../agentik-sdk" }
-agentik-skill = { path = "../agentik-skill" }
 agentik-tools = { path = "../agentik-tools" }
 agentik-runtime = { path = "../agentik-runtime" }
 agentik-tui = { path = "../agentik-tui" }

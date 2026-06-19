@@ -1,7 +1,7 @@
 //! Agent kind registrations for the host binary.
 //!
 //! Each function here returns a fully constructed [`AgentBlueprint`] that bundles
-//! a skill tree and tool provider.
+//! a tool provider.
 
 use std::sync::Arc;
 
@@ -17,16 +17,10 @@ pub fn coder_kind() -> Arc<AgentBlueprint> {
         tool_provider.register(reg);
     }
 
-    // Build a skill tree from the `skills/` directory on disk.
-    let skill_tree = agentik_skill::load_skill_tree_from_dirs(
-        &[std::path::PathBuf::from("skills")],
-    );
-
     Arc::new(
         AgentBlueprint::new(
             "coder",
             "Generic Coder",
-            skill_tree,
             tool_provider,
         )
         .with_identity(

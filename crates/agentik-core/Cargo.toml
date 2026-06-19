@@ -18,8 +18,6 @@ uuid = { version = "1.12", features = ["v4"] }
 agentik-sdk = { path = "../agentik-sdk" }
 agentik-api = { path = "../agentik-api" }
 agentik-proc = { path = "../agentik-proc" }
-agentik-skill = { path = "../agentik-skill" }
-agentik-skill-client = { path = "../agentik-skill-client" }
 async-trait = "0.1"
 futures = "0.3"
 thiserror = "2"

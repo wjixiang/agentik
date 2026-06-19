@@ -2,8 +2,8 @@
 //!
 //! Talks to the `agentik-runtime` daemon's REST API (see
 //! `agentik-runtime/src/http.rs`). All payloads are JSON (the `agentik-api`
-//! wire types); the two event streams (`stream_events`, `watch_skills`) are
-//! consumed as Server-Sent Events.
+//! wire types); the event stream (`stream_events`) is consumed as
+//! Server-Sent Events.
 
 use std::time::Duration;
 
@@ -13,7 +13,6 @@ use tokio_stream::StreamExt as _;
 
 use agentik_api::{
     AgentLifecycleStatus, AgentSpawnOpts, ContentBlock, ModelConfig, ProcessEvent,
-    SkillChangeNotificationWire, SkillTreeNodeWire, SkillWire,
 };
 
 const BASE_PATH: &str = "/api/v1";
@@ -70,34 +69,6 @@ struct InjectMessageReq<'a> {
 #[derive(serde::Deserialize)]
 struct StatusDto {
     status: AgentLifecycleStatus,
-}
-
-#[derive(serde::Serialize)]
-struct DirReq<'a> {
-    dir: &'a str,
-}
-
-#[derive(serde::Deserialize)]
-struct ImportResultDto {
-    count: u32,
-    #[serde(default)]
-    error: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-#[allow(dead_code)]
-struct ReloadResultDto {
-    skill: Option<SkillWire>,
-    #[serde(default)]
-    not_changed: bool,
-    #[serde(default)]
-    error: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct SkillListReq {
-    user_invocable_only: bool,
-    model_invocable_only: bool,
 }
 
 /// HTTP/SSE client for the agentik control plane.
@@ -259,97 +230,6 @@ impl ControlClient {
         self.sse_stream::<ProcessEvent>("/events").await
     }
 
-    // ── Skill tree management ──
-
-    pub async fn list_skills(
-        &mut self,
-        user_invocable_only: bool,
-        model_invocable_only: bool,
-    ) -> Result<Vec<SkillWire>, ControlClientError> {
-        let resp = self
-            .http
-            .get(self.url("/skills"))
-            .query(&SkillListReq {
-                user_invocable_only,
-                model_invocable_only,
-            })
-            .send()
-            .await?;
-        self.decode(resp).await
-    }
-
-    pub async fn get_skill(&mut self, name: &str) -> Result<Option<SkillWire>, ControlClientError> {
-        let resp = self
-            .http
-            .get(self.url(&format!("/skills/{name}")))
-            .send()
-            .await?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let skill: SkillWire = self.decode(resp).await?;
-        Ok(Some(skill))
-    }
-
-    pub async fn get_skill_tree(
-        &mut self,
-    ) -> Result<Option<SkillTreeNodeWire>, ControlClientError> {
-        let resp = self.http.get(self.url("/skills/tree")).send().await?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let tree: SkillTreeNodeWire = self.decode(resp).await?;
-        Ok(Some(tree))
-    }
-
-    pub async fn reload_skill(
-        &mut self,
-        name: &str,
-    ) -> Result<Option<SkillWire>, ControlClientError> {
-        let resp = self
-            .http
-            .post(self.url(&format!("/skills/{name}/reload")))
-            .send()
-            .await?;
-        let dto: ReloadResultDto = self.decode(resp).await?;
-        if let Some(e) = dto.error {
-            return Err(ControlClientError::Server(e));
-        }
-        Ok(dto.skill)
-    }
-
-    pub async fn import_skills(&mut self, dir: &str) -> Result<u32, ControlClientError> {
-        let resp = self
-            .http
-            .post(self.url("/skills/import"))
-            .json(&DirReq { dir })
-            .send()
-            .await?;
-        let dto: ImportResultDto = self.decode(resp).await?;
-        result_or_error(dto)
-    }
-
-    pub async fn export_skills(&mut self, dir: &str) -> Result<u32, ControlClientError> {
-        let resp = self
-            .http
-            .post(self.url("/skills/export"))
-            .json(&DirReq { dir })
-            .send()
-            .await?;
-        let dto: ImportResultDto = self.decode(resp).await?;
-        result_or_error(dto)
-    }
-
-    pub async fn watch_skills(
-        &mut self,
-    ) -> Result<
-        impl tokio_stream::Stream<Item = Result<SkillChangeNotificationWire, ControlClientError>>,
-        ControlClientError,
-    > {
-        self.sse_stream::<SkillChangeNotificationWire>("/skills/events")
-            .await
-    }
-
     // ── Internal helpers ──
 
     async fn post_empty<B: Serialize>(
@@ -402,10 +282,3 @@ impl ControlClient {
 
 #[derive(serde::Deserialize)]
 struct Ackless {}
-
-fn result_or_error(dto: ImportResultDto) -> Result<u32, ControlClientError> {
-    match dto.error {
-        None => Ok(dto.count),
-        Some(e) => Err(ControlClientError::Server(e)),
-    }
-}

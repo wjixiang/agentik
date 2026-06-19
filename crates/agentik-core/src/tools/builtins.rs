@@ -5,10 +5,8 @@
 //! the `agentik-tools` crate.
 
 pub mod lifecycle;
-pub mod skill;
 
 pub use lifecycle::{
     AbortTaskInput, AbortTaskTool, AttemptCompleteInput, AttemptCompleteTool,
     lifecycle_registrations,
 };
-pub use skill::{SkillActivationState, skill_registration};

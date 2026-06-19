@@ -115,7 +115,6 @@ pub enum ImageSource {
 pub enum ToolEffect {
     AttemptComplete,
     Abort,
-    ActivateSkill { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

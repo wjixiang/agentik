@@ -200,7 +200,7 @@ async fn serve(
 
     // ── Control-plane HTTP (REST + SSE) server ──
     let shutdown = CancellationToken::new();
-    let control_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let control_listener = TcpListener::bind("0.0.0.0:0").await?;
     let control_addr = control_listener.local_addr()?;
     let state = http::HttpState::new(pm, store, skill_client, shutdown.clone());
     let app = http::router(state);
@@ -224,7 +224,6 @@ async fn serve(
 
     println!("agentik-runtime daemon");
     println!("  control: http://{control_addr}");
-    println!("  docs   : http://{control_addr}/docs");
     if let Some(sa) = skill_addr {
         println!("  skills : http://{sa}");
     }

@@ -3,3 +3,6 @@
 target
 dendrite/
 *.db
+apps/phloem-web/node_modules/
+apps/phloem-web/.svelte-kit/
+apps/phloem-web/build/

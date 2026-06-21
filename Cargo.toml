@@ -9,6 +9,7 @@ members = [
   "crates/stat-primitives",
   "crates/gwascatalog-sdk",
   "crates/datalake", "crates/datalake-tools",
+  "apps/phloem-server",
 ]
 
 [workspace.package]

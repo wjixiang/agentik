@@ -1,41 +1,59 @@
-use agentik_core::tools::{ToolError, ToolFunction, ToolResult};
-use agentik_sdk::default_retry;
-use async_trait::async_trait;
-use datalake::datalake::Datalake;
-use iceberg::{Catalog, NamespaceIdent};
-use serde::{Deserialize, Serialize};
+//! Iceberg operation primitive tools for the agentik-core runtime.
+//!
+//! This crate exposes a basic set of catalog-level Iceberg operations as
+//! agent tools: namespace management, table management, and a read-only
+//! table preview backed by DataFusion. They build on the [`datalake`]
+//! crate, which owns the catalog/DataFusion session wiring.
+//!
+//! Wire the tools into an agent's toolset via [`iceberg_registrations`].
 
-#[derive(Debug, Serialize, Deserialize, agentik_proc::ToolInput)]
-#[tool(
-    name = "iceberg_list_namespaces",
-    description = "List namespaces under the given ident path(attention: this tool do not return all nested namespaces)"
-)]
-pub struct IcebergListNamespacesInput {
-    #[desc = "Iceberg namespace path, e.g. 'warehouse.analytics'"]
-    ident: String,
+pub mod common;
+pub mod namespace;
+pub mod query;
+pub mod table;
+
+use iceberg::Namespace;
+use serde_json::{Value, json};
+
+pub use agentik_core::tools::ToolRegistration;
+pub use namespace::{
+    IcebergCreateNamespaceInput, IcebergCreateNamespaceTool, IcebergDropNamespaceInput,
+    IcebergDropNamespaceTool, IcebergListNamespacesInput, IcebergListNamespacesTool,
+    IcebergNamespaceExistsInput, IcebergNamespaceExistsTool,
+};
+pub use query::{IcebergPreviewTableInput, IcebergPreviewTableTool};
+pub use table::{
+    IcebergCreateTableInput, IcebergCreateTableTool, IcebergDropTableInput, IcebergDropTableTool,
+    IcebergListTablesInput, IcebergListTablesTool, IcebergLoadTableInput, IcebergLoadTableTool,
+    IcebergRenameTableInput, IcebergRenameTableTool, IcebergTableExistsInput,
+    IcebergTableExistsTool,
+};
+
+/// Serialize an Iceberg [`Namespace`] into a JSON object.
+fn ns_to_json(ns: &Namespace, already_exists: bool) -> Value {
+    json!({
+        "namespace": ns.name().as_ref().join("."),
+        "properties": ns.properties(),
+        "already_exists": already_exists,
+    })
 }
 
-pub struct IcebergListNamespaceTool {}
-
-#[async_trait]
-impl ToolFunction for IcebergListNamespaceTool {
-    #[doc = " Strongly-typed input parameter struct. See trait docs."]
-    #[doc = ""]
-    #[doc = " The `ToolInput` bound means `Input` can describe its own"]
-    #[doc = " [`ToolDefinition`] (typically derived via `#[derive(ToolInput)]`),"]
-    #[doc = " which lets `definition()` delegate automatically."]
-    type Input = IcebergListNamespacesInput;
-
-    async fn run(&self, input: Self::Input) -> Result<ToolResult, ToolError> {
-        let datalake = Datalake::default();
-        let catalog = datalake.get_catalog().await?;
-        let result = catalog
-            .list_namespaces(Some(&NamespaceIdent::from_strs(&[input.ident]).unwrap()))
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                source: Box::new(e),
-            })?;
-
-        Ok(ToolResult::success(format!("{:?}", result)))
-    }
+/// All Iceberg primitive tool registrations, ready to register into a toolset.
+pub fn iceberg_registrations() -> Vec<ToolRegistration> {
+    vec![
+        // namespaces
+        ToolRegistration::from(IcebergListNamespacesTool),
+        ToolRegistration::from(IcebergCreateNamespaceTool),
+        ToolRegistration::from(IcebergNamespaceExistsTool),
+        ToolRegistration::from(IcebergDropNamespaceTool),
+        // tables
+        ToolRegistration::from(IcebergListTablesTool),
+        ToolRegistration::from(IcebergTableExistsTool),
+        ToolRegistration::from(IcebergLoadTableTool),
+        ToolRegistration::from(IcebergCreateTableTool),
+        ToolRegistration::from(IcebergDropTableTool),
+        ToolRegistration::from(IcebergRenameTableTool),
+        // read
+        ToolRegistration::from(IcebergPreviewTableTool),
+    ]
 }

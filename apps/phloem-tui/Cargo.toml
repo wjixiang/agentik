@@ -8,12 +8,21 @@ rust-version.workspace = true
 [dependencies]
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
-ratatui = "0.30.0"
+ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
+ratatui-comfy-tabs = "0.5"
 agentik-core = { path = "../../crates/agentik-core" }
 agentik-sdk = { path = "../../crates/agentik-sdk" }
 rusqlite = "0.40.1"
 anyhow.workspace = true
+tui-markdown = "0.3.7"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+tracing-appender = "0.2"
+time = { version = "0.3", features = ["macros"] }
 uuid = "1.23.3"
+tokio.workspace = true
+aether-tools = { path = "../../crates/aether-tools" }
+datalake = { path = "../../crates/datalake" }
 
 [lints]
 workspace = true

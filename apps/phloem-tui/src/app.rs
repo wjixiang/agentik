@@ -1,33 +1,35 @@
-use agentik_core::model::model_pool::ModelPool;
+use std::time::Duration;
+
 use agentik_sdk::AuthMethod;
 use agentik_sdk::model::model_pool::ModelPoolConfig;
 use agentik_sdk::model::{ModelInfo, ProviderConfig};
-use crossterm::event::Event;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Layout, Rect},
-    style::Style,
-    symbols,
-    widgets::{Block, Tabs},
+    layout::{Constraint, Direction, Layout},
+    prelude::Widget,
 };
+use ratatui_comfy_tabs::{TabBarAlign, TabDirection, TabNav, TabNavState};
 use rusqlite::Connection;
-use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::state::{self, AppState, MainTabState};
+use crate::agent_runtime::AgentRuntime;
+use crate::state::{self, AppState, InputMode, MainTabState};
+use crate::widgets::agent_tab_widget::AgentTabWidget;
+
+const POLL_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub struct App {
-    conn: Arc<Connection>,
-    model_pool: ModelPool,
     state: AppState,
+    tab_state: TabNavState,
+    agent_runtime: AgentRuntime,
+    conn: Connection,
 }
 
 impl App {
     pub fn new() -> Self {
-        let conn = Arc::new(Connection::open("phloem.db").expect("failed to open phloem.db"));
+        let conn = Connection::open("phloem.db").expect("failed to open phloem.db");
 
-        // Enable FK enforcement (off by default in SQLite) so the
-        // models→providers ON DELETE CASCADE rule actually fires.
         conn.pragma_update(None, "foreign_keys", "ON")
             .expect("failed to enable foreign_keys");
 
@@ -35,30 +37,57 @@ impl App {
 
         let model_pool = Self::build_model_pool(&conn).expect("failed to build model pool");
 
+        let agent_runtime = AgentRuntime::new(model_pool, "You are a helpful assistant.")
+            .expect("failed to create agent runtime");
+
+        let mut state = AppState::default();
+        Self::reload_config(&mut state.config_tab_state, &conn);
+
         Self {
+            state,
+            tab_state: TabNavState::new(MainTabState::default().index()),
+            agent_runtime,
             conn,
-            model_pool,
-            state: AppState::default(),
         }
     }
 
-    fn build_model_pool(conn: &Connection) -> Result<ModelPool, Box<dyn std::error::Error>> {
+    /// Re-read providers and models from the database, clamping selections.
+    fn reload_config(cs: &mut crate::state::ConfigTabState, conn: &Connection) {
+        cs.providers = crate::config_db::ProviderRow::all(conn).unwrap_or_default();
+        cs.models = crate::config_db::ModelRow::all(conn).unwrap_or_default();
+        if !cs.providers.is_empty() && cs.selected_provider >= cs.providers.len() {
+            cs.selected_provider = cs.providers.len() - 1;
+        } else if cs.providers.is_empty() {
+            cs.selected_provider = 0;
+        }
+        if !cs.models.is_empty() && cs.selected_model >= cs.models.len() {
+            cs.selected_model = cs.models.len() - 1;
+        } else if cs.models.is_empty() {
+            cs.selected_model = 0;
+        }
+    }
+
+    fn build_model_pool(
+        conn: &Connection,
+    ) -> Result<agentik_core::model::model_pool::ModelPool, Box<dyn std::error::Error>> {
         let mut stmt = conn.prepare(
             "SELECT id, name, base_url, api_key, auth_method, provider_type FROM providers",
         )?;
         let providers: Vec<ProviderConfig> = stmt
             .query_map([], |row| {
-                let id: String = row.get(0)?;
+                // The schema uses an INTEGER autoincrement PK, but ProviderConfig
+                // keys providers by Uuid. Map the integer to a deterministic Uuid
+                // so the same id always yields the same Uuid (the pool joins
+                // models to providers by Uuid equality).
+                let id: i64 = row.get(0)?;
                 let auth_method: String = row.get(4)?;
-                let uuid = Uuid::parse_str(&id)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
                 let auth: AuthMethod = auth_method.try_into().map_err(
                     |e: agentik_sdk::types::errors::AnthropicError| {
                         rusqlite::Error::ToSqlConversionFailure(e.into())
                     },
                 )?;
                 Ok(ProviderConfig {
-                    id: uuid,
+                    id: Uuid::from_u128(id as u128),
                     name: row.get(1)?,
                     base_url: row.get(2)?,
                     api_key: row.get(3)?,
@@ -76,10 +105,10 @@ impl App {
         )?;
         let models: Vec<ModelInfo> = stmt
             .query_map([], |row| {
+                let provider_id: i64 = row.get(1)?;
                 Ok(ModelInfo {
                     model_name: row.get(0)?,
-                    provider_id: Uuid::parse_str(&row.get::<_, String>(1)?)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?,
+                    provider_id: Uuid::from_u128(provider_id as u128),
                     context_length: row.get::<_, i64>(2)? as u64,
                     max_output_tokens: row.get::<_, i64>(3)? as u64,
                     vision_ability: row.get::<_, i32>(4)? != 0,
@@ -93,12 +122,10 @@ impl App {
             .collect::<Result<Vec<_>, _>>()?;
 
         let config = ModelPoolConfig { providers, models };
-        ModelPool::from_config(config).map_err(Into::into)
+        agentik_core::model::model_pool::ModelPool::from_config(config).map_err(Into::into)
     }
 
     fn init_database(conn: &Connection) -> rusqlite::Result<()> {
-        // Provider table — the "master" side. One row per endpoint:
-        // a provider type combined with a concrete base URL + credentials.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS providers (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,8 +138,6 @@ impl App {
             (),
         )?;
 
-        // Model table — references a provider by id. Holds only capabilities;
-        // connection config lives on the provider row.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS models (
                 id                          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,95 +160,338 @@ impl App {
     }
 
     pub fn start(&mut self) -> color_eyre::Result<()> {
-        color_eyre::install()?;
         ratatui::run(|f| self.app(f))?;
         Ok(())
     }
+
     fn app(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         loop {
             terminal.draw(|f| self.render(f))?;
-            let event = crossterm::event::read()?;
 
-            match event {
-                Event::FocusGained => (),
-                Event::FocusLost => (),
-                Event::Key(key_event) => {
-                    if key_event.is_press() {
-                        match key_event.code {
-                            crossterm::event::KeyCode::Backspace => (),
-                            crossterm::event::KeyCode::Enter => (),
-                            crossterm::event::KeyCode::Left => (),
-                            crossterm::event::KeyCode::Right => (),
-                            crossterm::event::KeyCode::Up => (),
-                            crossterm::event::KeyCode::Down => (),
-                            crossterm::event::KeyCode::Home => (),
-                            crossterm::event::KeyCode::End => (),
-                            crossterm::event::KeyCode::PageUp => (),
-                            crossterm::event::KeyCode::PageDown => (),
-                            crossterm::event::KeyCode::Tab => {
-                                self.state.main_tab_state = self.state.main_tab_state.next();
-                            }
-                            crossterm::event::KeyCode::BackTab => {
-                                self.state.main_tab_state = self.state.main_tab_state.prev();
-                            }
-                            crossterm::event::KeyCode::Delete => (),
-                            crossterm::event::KeyCode::Insert => (),
-                            crossterm::event::KeyCode::F(_) => (),
-                            crossterm::event::KeyCode::Char(key) => match key {
-                                'q' => break Ok(()), // Exit TUI
-                                ']' => {
-                                    self.state.main_tab_state = self.state.main_tab_state.next();
-                                }
-                                '[' => {
-                                    self.state.main_tab_state = self.state.main_tab_state.prev();
-                                }
-                                _ => (),
-                            },
-                            crossterm::event::KeyCode::Null => (),
-                            crossterm::event::KeyCode::Esc => (),
-                            crossterm::event::KeyCode::CapsLock => (),
-                            crossterm::event::KeyCode::ScrollLock => (),
-                            crossterm::event::KeyCode::NumLock => (),
-                            crossterm::event::KeyCode::PrintScreen => (),
-                            crossterm::event::KeyCode::Pause => (),
-                            crossterm::event::KeyCode::Menu => (),
-                            crossterm::event::KeyCode::KeypadBegin => (),
-                            crossterm::event::KeyCode::Media(_media_key_code) => (),
-                            crossterm::event::KeyCode::Modifier(_modifier_key_code) => (),
-                        }
-                    }
-                }
-                Event::Mouse(_mouse_event) => (),
-                Event::Paste(_) => (),
-                Event::Resize(_, _) => (),
+            // Poll for agent events with a timeout so we don't block forever.
+            if event::poll(POLL_TIMEOUT)? {
+                let event = event::read()?;
+                self.handle_event(terminal, event)?;
+            } else {
+                // Timeout: drain any pending agent events.
+                self.drain_agent_events();
             }
         }
     }
 
-    fn render(&self, frame: &mut Frame) {
-        let first_layout = Layout::default()
-            .direction(ratatui::layout::Direction::Vertical)
-            .constraints(vec![Constraint::Percentage(10), Constraint::Percentage(90)])
+    fn drain_agent_events(&mut self) {
+        while let Some(event) = self.agent_runtime.poll_event() {
+            state::apply_event(&mut self.state.agent_tab_state, event);
+        }
+    }
+
+    fn handle_event(
+        &mut self,
+        _terminal: &mut DefaultTerminal,
+        event: Event,
+    ) -> std::io::Result<()> {
+        match event {
+            Event::Key(key) if key.is_press() => {
+                // Ctrl+C: always quit
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "Ctrl+C",
+                    ));
+                }
+
+                // Tab switching (global)
+                match key.code {
+                    // KeyCode::Tab => {
+                    //     self.tab_state
+                    //         .select_direction_wrapping(TabDirection::Next, state::TABS.len());
+                    //     self.sync_tab_state();
+                    //     return Ok(());
+                    // }
+                    // KeyCode::BackTab => {
+                    //     self.tab_state
+                    //         .select_direction_wrapping(TabDirection::Previous, state::TABS.len());
+                    //     self.sync_tab_state();
+                    //     return Ok(());
+                    // }
+                    KeyCode::Char(']') => {
+                        self.tab_state
+                            .select_direction_wrapping(TabDirection::Next, state::TABS.len());
+                        self.sync_tab_state();
+                        return Ok(());
+                    }
+                    KeyCode::Char('[') => {
+                        self.tab_state
+                            .select_direction_wrapping(TabDirection::Previous, state::TABS.len());
+                        self.sync_tab_state();
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+
+                // Delegate to active tab
+                match self.state.main_tab_state {
+                    MainTabState::AgentTab => {
+                        self.handle_agent_key(key);
+                    }
+                    MainTabState::ConfigTab => {
+                        self.handle_config_key(key);
+                    }
+                }
+            }
+            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {}
+            Event::Mouse(_) | Event::Paste(_) => {}
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_agent_key(&mut self, key: KeyEvent) {
+        let ts = &mut self.state.agent_tab_state;
+
+        match ts.input_mode {
+            InputMode::Browse => self.handle_browse_key(key),
+            InputMode::Input => self.handle_input_key(key),
+        }
+    }
+
+    /// Key handling in browse mode: j/k scroll, Enter enters input mode.
+    fn handle_browse_key(&mut self, key: KeyEvent) {
+        let ts = &mut self.state.agent_tab_state;
+
+        match key.code {
+            // j / Down: scroll down (show later content)
+            KeyCode::Char('j') | KeyCode::Down => {
+                ts.scroll_offset = ts.scroll_offset.saturating_add(1);
+                ts.auto_scroll = false;
+            }
+            // k / Up: scroll up (show earlier content)
+            KeyCode::Char('k') | KeyCode::Up => {
+                ts.scroll_offset = ts.scroll_offset.saturating_sub(1);
+                ts.auto_scroll = false;
+            }
+            // G (Shift+g): jump to bottom, re-enable auto-scroll
+            KeyCode::Char('G') => {
+                ts.auto_scroll = true;
+            }
+            // g: jump to top
+            KeyCode::Char('g') => {
+                ts.scroll_offset = 0;
+                ts.auto_scroll = false;
+            }
+            // Enter: switch to input mode
+            KeyCode::Enter => {
+                ts.input_mode = InputMode::Input;
+            }
+            _ => {}
+        }
+    }
+
+    /// Key handling in input mode: typing goes to input, Enter sends, Esc exits.
+    fn handle_input_key(&mut self, key: KeyEvent) {
+        let ts = &mut self.state.agent_tab_state;
+
+        match key.code {
+            // Esc: exit input mode, clear input
+            KeyCode::Esc => {
+                ts.input.clear();
+                ts.input_mode = InputMode::Browse;
+            }
+            // Enter: send message (if valid), return to browse mode
+            KeyCode::Enter => {
+                if ts.can_send() {
+                    let text = ts.take_input();
+                    ts.push_user_message(text.clone());
+                    self.agent_runtime.send_message(text);
+                    ts.scroll_to_bottom();
+                }
+                ts.input_mode = InputMode::Browse;
+            }
+            // Delegate all other keys to input when idle
+            _ => {
+                if ts.status == state::AgentStatus::Idle {
+                    ts.input.handle_key(key);
+                }
+            }
+        }
+    }
+
+    fn sync_tab_state(&mut self) {
+        self.state.main_tab_state = MainTabState::from_index(self.tab_state.selected);
+    }
+
+    fn render(&mut self, frame: &mut Frame) {
+        let areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // TabBar
+                Constraint::Min(5),    // Content (Widget handles its own layout)
+            ])
             .split(frame.area());
 
-        let tabs = Tabs::new(state::TABS.to_vec())
-            .block(Block::bordered().title("test_tab"))
-            .highlight_style(Style::default().yellow())
-            .select(self.state.main_tab_state.index())
-            .divider(symbols::DOT)
-            .padding("->", "<-");
-
-        // Render main tab area
-        frame.render_widget(tabs, first_layout[0]);
+        // ── TabBar ──
+        let tabs = TabNav::new(state::TABS, self.tab_state.selected)
+            .tab_bar_align(TabBarAlign::Center)
+            .highlight_style(ratatui::style::Style::default().yellow());
+        frame.render_stateful_widget(tabs, areas[0], &mut self.tab_state);
 
         match self.state.main_tab_state {
-            state::MainTabState::AgentTab => {
-                frame.render_widget("hello", first_layout[1]);
+            MainTabState::AgentTab => {
+                let widget = AgentTabWidget {
+                    state: &mut self.state.agent_tab_state,
+                };
+                frame.render_widget(widget, areas[1]);
             }
-            state::MainTabState::ConfigTab => {
-                frame.render_widget("hi", first_layout[1]);
+            MainTabState::ConfigTab => {
+                crate::widgets::config_widget::render_config(
+                    &self.state.config_tab_state,
+                    areas[1],
+                    frame.buffer_mut(),
+                );
             }
+        }
+    }
+
+    // ── Config tab ──────────────────────────────────────
+
+    /// Config tab key handling. Esc/Enter-in-form/'d'-delete need database
+    /// access, so they are handled here; everything else is delegated to the
+    /// widget's key handler.
+    fn handle_config_key(&mut self, key: KeyEvent) {
+        let code = key.code;
+        let cs = &mut self.state.config_tab_state;
+
+        // Esc closes any open form.
+        if code == KeyCode::Esc && !matches!(cs.mode, state::ConfigMode::Browsing) {
+            cs.mode = state::ConfigMode::Browsing;
+            cs.message.clear();
+            return;
+        }
+
+        // Enter inside a form validates and saves.
+        if code == KeyCode::Enter {
+            if matches!(cs.mode, state::ConfigMode::EditProvider(_)) {
+                self.save_provider_form();
+                return;
+            }
+            if matches!(cs.mode, state::ConfigMode::EditModel(_)) {
+                self.save_model_form();
+                return;
+            }
+        }
+
+        // 'd' in browsing deletes the selected row.
+        if code == KeyCode::Char('d') && matches!(cs.mode, state::ConfigMode::Browsing) {
+            self.delete_selected_config();
+            return;
+        }
+
+        // Everything else (navigation, opening forms, typing) goes to the widget.
+        crate::widgets::config_widget::handle_config_key(&mut self.state.config_tab_state, key);
+    }
+
+    /// Take the open provider form out of state, validate, persist, reload.
+    fn save_provider_form(&mut self) {
+        let conn = &self.conn;
+        let cs = &mut self.state.config_tab_state;
+        let form = match std::mem::replace(&mut cs.mode, state::ConfigMode::Browsing) {
+            state::ConfigMode::EditProvider(f) => f,
+            _ => return,
         };
-        // frame.render_widget("hello world", frame.area());
+
+        match form.collect() {
+            Err(e) => {
+                cs.message = e;
+                cs.mode = state::ConfigMode::EditProvider(form);
+            }
+            Ok(input) => {
+                let id = form.id;
+                let res = match id {
+                    Some(id) => crate::config_db::ProviderRow::update(conn, id, &input),
+                    None => crate::config_db::ProviderRow::insert(conn, &input).map(|_| ()),
+                };
+                match res {
+                    Ok(()) => {
+                        Self::reload_config(cs, conn);
+                        cs.message = match id {
+                            Some(_) => "provider updated".to_string(),
+                            None => "provider added".to_string(),
+                        };
+                    }
+                    Err(e) => {
+                        cs.message = format!("db error: {e}");
+                        cs.mode = state::ConfigMode::EditProvider(form);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Take the open model form out of state, validate, persist, reload.
+    fn save_model_form(&mut self) {
+        let conn = &self.conn;
+        let cs = &mut self.state.config_tab_state;
+        let (form, providers) = match std::mem::replace(&mut cs.mode, state::ConfigMode::Browsing) {
+            state::ConfigMode::EditModel(f) => (f, cs.providers.clone()),
+            _ => return,
+        };
+
+        match form.collect(&providers) {
+            Err(e) => {
+                cs.message = e;
+                cs.mode = state::ConfigMode::EditModel(form);
+            }
+            Ok(input) => {
+                let id = form.id;
+                let res = match id {
+                    Some(id) => crate::config_db::ModelRow::update(conn, id, &input),
+                    None => crate::config_db::ModelRow::insert(conn, &input).map(|_| ()),
+                };
+                match res {
+                    Ok(()) => {
+                        Self::reload_config(cs, conn);
+                        cs.message = match id {
+                            Some(_) => "model updated".to_string(),
+                            None => "model added".to_string(),
+                        };
+                    }
+                    Err(e) => {
+                        cs.message = format!("db error: {e}");
+                        cs.mode = state::ConfigMode::EditModel(form);
+                    }
+                }
+            }
+        }
+    }
+
+    fn delete_selected_config(&mut self) {
+        let conn = &self.conn;
+        let cs = &mut self.state.config_tab_state;
+        match cs.pane {
+            state::ConfigPane::Providers => {
+                let Some(row) = cs.selected_provider_row().cloned() else {
+                    return;
+                };
+                match crate::config_db::ProviderRow::delete(conn, row.id) {
+                    Ok(()) => {
+                        Self::reload_config(cs, conn);
+                        cs.message = format!("deleted provider '{}'", row.name);
+                    }
+                    Err(e) => cs.message = format!("db error: {e}"),
+                }
+            }
+            state::ConfigPane::Models => {
+                let Some(row) = cs.selected_model_row().cloned() else {
+                    return;
+                };
+                match crate::config_db::ModelRow::delete(conn, row.id) {
+                    Ok(()) => {
+                        Self::reload_config(cs, conn);
+                        cs.message = format!("deleted model '{}'", row.model_name);
+                    }
+                    Err(e) => cs.message = format!("db error: {e}"),
+                }
+            }
+        }
     }
 }

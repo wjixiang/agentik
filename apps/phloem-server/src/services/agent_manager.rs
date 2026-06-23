@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use agentik_core::Agent;
 use agentik_sdk::types::{AgentEvent, ContentBlock};
-use datalake_tools::iceberg_registrations;
+use aether_tools::{aether_registrations, AetherWorkspace};
 
 use crate::state::AppState;
 
@@ -142,7 +142,8 @@ pub async fn get_or_create_agent(
         }
     };
 
-    let tools = iceberg_registrations();
+    let workspace = Arc::new(AetherWorkspace::new().await?);
+    let tools = aether_registrations(workspace);
     let mut builder = Agent::builder()
         .with_event_tx(event_tx)
         .with_tools(tools)

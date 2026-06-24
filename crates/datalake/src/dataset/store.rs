@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow_array::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
@@ -297,7 +298,12 @@ impl DatasetStore {
         provenance: super::Provenance,
     ) -> Result<AetherDataset, DatasetError> {
         let schema: Arc<arrow_schema::Schema> = Arc::new(df.schema().as_arrow().clone());
-        let batches = df.collect().await?;
+        let batches: Vec<RecordBatch> = df
+            .collect()
+            .await?
+            .into_iter()
+            .filter(|b| b.num_rows() > 0)
+            .collect();
         Ok(AetherDataset::with_schema(name, schema, batches).with_provenance(provenance))
     }
 
@@ -328,7 +334,22 @@ impl DatasetStore {
 
     /// Register a single dataset as a DataFusion `MemTable`.
     fn register_as_table(&self, ds: &AetherDataset) -> Result<(), DatasetError> {
-        let partitions: Vec<Vec<_>> = ds.batches().iter().map(|b| vec![b.clone()]).collect();
+        let partitions: Vec<Vec<_>> = ds
+            .batches()
+            .iter()
+            .filter(|b| b.num_rows() > 0)
+            .map(|b| vec![b.clone()])
+            .collect();
+
+        // MemTable requires at least one partition. If the dataset has no
+        // non-empty batches (e.g. an empty result), register an empty
+        // RecordBatch partition so that subsequent SQL can still reference
+        // the table schema (SELECT will return 0 rows).
+        let partitions = if partitions.is_empty() {
+            vec![vec![RecordBatch::new_empty(ds.schema().clone())]]
+        } else {
+            partitions
+        };
 
         let table = MemTable::try_new(ds.schema().clone(), partitions)?;
         // Ignore error if table doesn't exist yet.

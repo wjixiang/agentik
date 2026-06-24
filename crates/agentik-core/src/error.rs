@@ -80,6 +80,10 @@ pub enum AgentError {
     /// with fresh context. Handled by the agent loop — not a user-visible error.
     #[error("compaction rebuild")]
     CompactionRebuild,
+
+    /// The agent loop was interrupted by an external cancellation signal.
+    #[error("agent cancelled by user")]
+    Cancelled,
 }
 
 impl Retryable for AgentError {

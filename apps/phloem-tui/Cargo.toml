@@ -24,6 +24,8 @@ uuid = "1.23.3"
 tokio.workspace = true
 aether-tools = { path = "../../crates/aether-tools" }
 datalake = { path = "../../crates/datalake" }
+opengwas-rs = { path = "../../crates/opengwas-rs" }
+tokio-util = "0.7.18"
 
 [lints]
 workspace = true

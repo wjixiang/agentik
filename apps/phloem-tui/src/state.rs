@@ -128,7 +128,9 @@ impl AgentTabState {
 
     /// Returns true when the viewport is showing the bottom of the content.
     pub fn is_at_bottom(&self, viewport_height: u16) -> bool {
-        let max_offset = self.content_line_count.saturating_sub(viewport_height as usize);
+        let max_offset = self
+            .content_line_count
+            .saturating_sub(viewport_height as usize);
         self.scroll_offset >= max_offset
     }
 }
@@ -204,9 +206,9 @@ pub fn apply_event(state: &mut AgentTabState, event: AgentEvent) {
             state.scroll_to_bottom();
         }
         AgentEvent::Error(msg) => {
-            state.status = AgentStatus::Error;
             state.messages.push(ChatLine::Error(msg));
             state.scroll_to_bottom();
+            state.status = AgentStatus::Idle;
         }
         // Streaming protocol events — not surfaced directly to the chat view
         AgentEvent::StreamStart { .. }

@@ -4087,6 +4087,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengwas-rs"
+version = "0.1.0"
+dependencies = [
+ "agentik-core",
+ "agentik-proc",
+ "agentik-sdk",
+ "anyhow",
+ "async-trait",
+ "reqwest 0.13.4",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4367,6 +4384,7 @@ dependencies = [
  "chrono",
  "datalake",
  "futures",
+ "opengwas-rs",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4391,12 +4409,14 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "datalake",
+ "opengwas-rs",
  "ratatui",
  "ratatui-comfy-tabs",
  "ratatui-textarea",
  "rusqlite",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

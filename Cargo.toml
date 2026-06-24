@@ -9,7 +9,7 @@ members = [
   "crates/stat-primitives",
   "crates/gwascatalog-sdk",
   "crates/datalake", "crates/bibliography-tools",
-  "apps/phloem-server", "apps/phloem-tui", "crates/aether-tools",
+  "apps/phloem-server", "apps/phloem-tui", "crates/aether-tools", "crates/opengwas-rs",
 ]
 
 [workspace.package]

@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use agentik_sdk::model::model_pool::ModelPool;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentConfig, TokenBudget};
 use crate::context::ContextProvider;
 use crate::error::AgentError;
-use agentik_sdk::types::messages::Message;
 use crate::skill::{self, Skill};
 use crate::storage::AgentSnapshotStorage;
-use crate::{lifecycle::AgentLifecycle, memory::Memory, tools::Toolset};
 use crate::tools::ToolRegistration;
+use crate::{lifecycle::AgentLifecycle, memory::Memory, tools::Toolset};
+use agentik_sdk::types::messages::Message;
 
 pub struct AgentBuilder {
     model_pool: Option<Arc<ModelPool>>,
@@ -31,6 +32,7 @@ pub struct AgentBuilder {
     memory: Option<Memory>,
     /// Optional skill workflow to attach to the agent.
     skill: Option<Skill>,
+    cancel_token: Option<CancellationToken>,
 }
 
 impl Clone for AgentBuilder {
@@ -49,6 +51,7 @@ impl Clone for AgentBuilder {
             id: self.id,
             memory: self.memory.clone(),
             skill: self.skill.clone(),
+            cancel_token: self.cancel_token.clone(),
         }
     }
 }
@@ -69,6 +72,7 @@ impl AgentBuilder {
             id: None,
             memory: None,
             skill: None,
+            cancel_token: None,
         }
     }
 
@@ -160,6 +164,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+        self.cancel_token = Some(cancel_token);
+        self
+    }
+
     pub async fn build(mut self) -> Result<Agent, AgentError> {
         let model_pool = self
             .model_pool
@@ -194,6 +203,9 @@ impl AgentBuilder {
             memory
         };
 
+        // CancellationToken
+        let cancel_token = self.cancel_token.unwrap_or_else(CancellationToken::new);
+
         Ok(Agent {
             id: self.id.unwrap_or_else(Uuid::new_v4),
             model_pool,
@@ -209,6 +221,7 @@ impl AgentBuilder {
             skill_runtime: skill_runtime.map(|(rt, _)| rt),
             event_tx: self.event_tx,
             current_model_name: None,
+            cancel_token,
         })
     }
 }

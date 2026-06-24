@@ -15,6 +15,7 @@ use agentik_sdk::model::model_pool::ModelPool;
 use agentik_sdk::types::messages::{ContentBlock, Message, Role};
 use agentik_sdk::types::tools::ToolUse;
 use futures::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::{Level, event, span};
 use uuid::Uuid;
 
@@ -68,6 +69,9 @@ pub struct Agent {
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<agentik_sdk::types::AgentEvent>>,
     /// Currently selected model name. If None, falls back to round-robin.
     pub(crate) current_model_name: Option<String>,
+    /// External cancellation signal, Cloned out to callers so they can
+    /// interrupt the agent loop cooperatively.
+    pub(crate) cancel_token: CancellationToken,
 }
 
 impl Agent {
@@ -100,7 +104,10 @@ impl Agent {
     }
 
     /// Wire an event channel for external observation (e.g. TUI, tests).
-    pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<agentik_sdk::types::AgentEvent>) {
+    pub fn set_event_tx(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<agentik_sdk::types::AgentEvent>,
+    ) {
         self.event_tx = Some(tx);
     }
 
@@ -176,6 +183,16 @@ impl Agent {
         Ok(())
     }
 
+    /// Replace the cancellation token before the next [`start`] call.
+    ///
+    /// Because `CancellationToken` is one-shot (once cancelled it stays
+    /// cancelled), callers that reuse an `Agent` across multiple runs must
+    /// inject a fresh token each time — otherwise a prior cancel would
+    /// prevent every subsequent `start()` from entering its loop.
+    pub fn set_cancel_token(&mut self, token: CancellationToken) {
+        self.cancel_token = token;
+    }
+
     pub async fn start(&mut self) -> Result<(), AgentError> {
         self.lifecycle.set_running();
         self.send_event(agentik_sdk::types::AgentEvent::LlmResponse(
@@ -185,45 +202,62 @@ impl Agent {
         let mut iteration = 0;
         let mut consecutive_retries = 0;
         let mut retry_feedback: Option<String> = None;
+        let cancelled = self.cancel_token.clone();
 
-        while self.lifecycle.is_running() && iteration < self.config.max_iterations {
+        while self.lifecycle.is_running()
+            && iteration < self.config.max_iterations
+            && !self.cancel_token.is_cancelled()
+        {
             iteration += 1;
-            match self.agent_workflow(retry_feedback.take()).await {
-                Ok(()) => {
-                    consecutive_retries = 0;
-                    self.snapshot().await;
-                }
-                Err(AgentError::CompactionRebuild) => {
-                    // Compaction completed — re-enter the workflow with fresh context
-                    tracing::info!("compaction rebuild, re-entering workflow");
-                    continue;
-                }
-                Err(e) if e.is_retryable() && consecutive_retries < self.config.max_retries => {
-                    consecutive_retries += 1;
-                    tracing::warn!(
-                        "retryable error at iteration {}/{}, retry {}/{}: {e}",
-                        iteration,
-                        self.config.max_iterations,
-                        consecutive_retries,
-                        self.config.max_retries
-                    );
-                    let delay = Duration::from_secs(1) * (1 << (consecutive_retries - 1));
-                    tracing::warn!("exponential backoff: sleeping {delay:?} before retry");
-                    tokio::time::sleep(delay).await;
+            // Cooperatively race the workflow against the external cancel signal.
+            // `select!` awaits both branches simultaneously; whichever resolves
+            // first wins. `cancelled.cancelled()` returns a Future that resolves
+            // when `cancel_token.cancel()` is called from outside (e.g. user presses Esc).
+            tokio::select! {
+                result = self.agent_workflow(retry_feedback.take()) => {
+                    match result {
+                        Ok(()) => {
+                            consecutive_retries = 0;
+                            self.snapshot().await;
+                        }
+                        Err(AgentError::CompactionRebuild) => {
+                            tracing::info!("compaction rebuild, re-entering workflow");
+                            continue;
+                        }
+                        Err(e) if e.is_retryable() && consecutive_retries < self.config.max_retries => {
+                            consecutive_retries += 1;
+                            tracing::warn!(
+                                "retryable error at iteration {}/{}, retry {}/{}: {e}",
+                                iteration,
+                                self.config.max_iterations,
+                                consecutive_retries,
+                                self.config.max_retries
+                            );
+                            let delay = Duration::from_secs(1) * (1 << (consecutive_retries - 1));
+                            tracing::warn!("exponential backoff: sleeping {delay:?} before retry");
+                            tokio::time::sleep(delay).await;
 
-                    // Record error feedback
-                    self.memory.remember(Message::user(e.retry_message()))?;
+                            // Record error feedback
+                            self.memory.remember(Message::user(e.retry_message()))?;
 
-                    continue;
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e.to_string());
+                            self.send_event(agentik_sdk::types::AgentEvent::Error(format!("{}", e)));
+                            self.snapshot().await;
+                            return Err(AgentError::WorkflowFailed {
+                                iteration,
+                                error: Box::new(e),
+                            });
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("{}", e.to_string());
-                    self.send_event(agentik_sdk::types::AgentEvent::Error(format!("{}", e)));
+                _ = cancelled.cancelled() => {
+                    self.lifecycle.set_aborted();
                     self.snapshot().await;
-                    return Err(AgentError::WorkflowFailed {
-                        iteration,
-                        error: Box::new(e),
-                    });
+                    self.send_event(AgentEvent::Error("Task cancelled by user".into()));
+                    return Err(AgentError::Cancelled);
                 }
             }
         }
@@ -309,10 +343,7 @@ impl Agent {
             });
         }
 
-        let tool_results = self
-            .toolset
-            .execute(&toolcalls, allowed.as_deref())
-            .await?;
+        let tool_results = self.toolset.execute(&toolcalls, allowed.as_deref()).await?;
         tracing::debug!(?tool_results, "tool execution results");
 
         for tr in &tool_results {
@@ -458,9 +489,7 @@ impl Agent {
 
         let all_tools = self.toolset.tools_filtered(allowed);
 
-        let mut stream = model
-            .request_stream(context, &all_tools)
-            .await?;
+        let mut stream = model.request_stream(context, &all_tools).await?;
 
         while let Some(event) = stream.next().await {
             let stream_event = match event {
@@ -501,18 +530,15 @@ impl Agent {
         // (See also `AgentEvent::from_stream_event` for
         // `MessageStop`, which returns `None` for the same reason.)
 
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            stream.final_message(),
-        )
-        .await
-        .map_err(|e| AgentError::WorkflowFailed {
-            iteration: 0,
-            error: Box::new(AgentError::MissingConfig(format!(
-                "final_message() timed out: {e}"
-            ))),
-        })?
-        ?;
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.final_message())
+                .await
+                .map_err(|e| AgentError::WorkflowFailed {
+                    iteration: 0,
+                    error: Box::new(AgentError::MissingConfig(format!(
+                        "final_message() timed out: {e}"
+                    ))),
+                })??;
 
         tracing::debug!(?response, "LLM response");
 

@@ -7,7 +7,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
-use tui_markdown::{from_str_with_options, Options, StyleSheet};
+use tui_markdown::{Options, StyleSheet, from_str_with_options};
 
 use crate::state::ChatLine;
 
@@ -91,7 +91,11 @@ impl StatefulWidget for ChatWidget<'_> {
     fn render(self, area: Rect, buf: &mut ratatui::prelude::Buffer, state: &mut Self::State) {
         state.viewport_height = area.height;
 
-        let lines: Vec<Line<'_>> = self.messages.iter().flat_map(render_line).collect();
+        let lines: Vec<Line<'_>> = self
+            .messages
+            .iter()
+            .flat_map(|f| render_line(f, area))
+            .collect();
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
 
         state.total_lines = paragraph.line_count(area.width);
@@ -270,7 +274,7 @@ fn render_assistant_text<'a>(text: &'a str, out: &mut Vec<Line<'a>>) {
 }
 
 /// Render a single `ChatLine` into one or more `Line`s.
-fn render_line(msg: &ChatLine) -> Vec<Line<'_>> {
+fn render_line(msg: &ChatLine, area: Rect) -> Vec<Line<'_>> {
     match msg {
         ChatLine::User(text) => {
             let mut lines = vec![Line::from(Span::styled(
@@ -360,7 +364,7 @@ fn render_line(msg: &ChatLine) -> Vec<Line<'_>> {
         }
         ChatLine::Separator => {
             vec![Line::from(Span::styled(
-                "─".repeat(40),
+                "─".repeat(area.width as usize),
                 Style::default().fg(Color::DarkGray),
             ))]
         }

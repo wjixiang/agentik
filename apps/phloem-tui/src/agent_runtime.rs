@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use agentik_core::Agent;
 use agentik_sdk::model::model_pool::ModelPool;
 use agentik_sdk::types::{AgentEvent, ContentBlock};
-use datalake::aether::AetherWorkspace;
 use datalake::DatasetStore;
+use datalake::aether::AetherWorkspace;
+use opengwas_rs::OpengwasClient;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 /// Bridges the sync TUI thread to the async agent runtime.
 ///
@@ -17,6 +19,10 @@ pub struct AgentRuntime {
     event_rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
     runtime: tokio::runtime::Runtime,
     running: Arc<AtomicBool>,
+    /// Cancellation token for the *current* agent run.  Replaced with a fresh
+    /// token each time a new message is sent so that a prior cancel does not
+    /// prevent the next run from starting.
+    cancel_token: CancellationToken,
 }
 
 impl AgentRuntime {
@@ -40,6 +46,9 @@ impl AgentRuntime {
             let mut tools = aether_tools::iceberg_registrations(workspace);
             tools.extend(aether_tools::dataset_registrations(store));
 
+            let opengwas = Arc::new(OpengwasClient::new(None::<String>));
+            tools.extend(opengwas_rs::opengwas_registrations(opengwas));
+
             Agent::builder()
                 .with_model_pool(Arc::new(model_pool))
                 .with_event_tx(event_tx)
@@ -54,6 +63,7 @@ impl AgentRuntime {
             event_rx,
             runtime,
             running: Arc::new(AtomicBool::new(false)),
+            cancel_token: CancellationToken::new(),
         })
     }
 
@@ -61,7 +71,12 @@ impl AgentRuntime {
     ///
     /// If the agent is already running, the message is queued in memory
     /// and will be picked up on the next iteration.
-    pub fn send_message(&self, text: String) {
+    pub fn send_message(&mut self, text: String) {
+        // Create a fresh cancellation token for each run so that a prior
+        // cancel does not prevent the next run from starting.
+        let cancel_token = CancellationToken::new();
+        self.cancel_token = cancel_token.clone();
+
         let agent = Arc::clone(&self.agent);
         let running = Arc::clone(&self.running);
         let rt = self.runtime.handle();
@@ -74,12 +89,23 @@ impl AgentRuntime {
 
             if !running.load(Ordering::Relaxed) {
                 running.store(true, Ordering::Relaxed);
+                // Inject a fresh token before starting so `select!` races
+                // against *this* token rather than a stale (already-cancelled)
+                // one from a previous run.
+                agent.set_cancel_token(cancel_token);
                 let _ = agent.start().await;
                 running.store(false, Ordering::Relaxed);
             }
             // If already running, the injected message will be picked up
             // on the next loop iteration automatically.
         });
+    }
+
+    /// Cancel the currently running agent loop.
+    ///
+    /// Safe to call even when the agent is idle — it is a no-op in that case.
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
     }
 
     /// Non-blocking poll: drain all pending events from the channel.

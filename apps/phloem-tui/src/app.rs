@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use uuid::Uuid;
 
 use crate::agent_runtime::AgentRuntime;
-use crate::state::{self, AppState, InputMode, MainTabState};
+use crate::state::{self, AgentStatus, AppState, InputMode, MainTabState};
 use crate::widgets::agent_tab_widget::AgentTabWidget;
 
 const POLL_TIMEOUT: Duration = Duration::from_millis(250);
@@ -194,10 +194,15 @@ impl App {
             Event::Key(key) if key.is_press() => {
                 // Ctrl+C: always quit
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "Ctrl+C",
-                    ));
+                    if !matches!(self.state.agent_tab_state.status, AgentStatus::Idle) {
+                        self.agent_runtime.cancel();
+                        return Ok(());
+                    } else {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "Ctrl+C",
+                        ));
+                    }
                 }
 
                 // Tab switching (global)

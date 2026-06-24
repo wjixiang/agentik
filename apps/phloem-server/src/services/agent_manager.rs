@@ -9,6 +9,7 @@ use agentik_core::Agent;
 use agentik_sdk::types::{AgentEvent, ContentBlock};
 use aether_tools::{iceberg_registrations, dataset_registrations, AetherWorkspace};
 use datalake::DatasetStore;
+use opengwas_rs::{opengwas_registrations, OpengwasClient};
 
 use crate::state::AppState;
 
@@ -145,8 +146,10 @@ pub async fn get_or_create_agent(
 
     let workspace = Arc::new(AetherWorkspace::new().await?);
     let store = Arc::new(DatasetStore::from_workspace(&workspace));
+    let opengwas = Arc::new(OpengwasClient::new(None::<String>));
     let mut tools = iceberg_registrations(workspace);
     tools.extend(dataset_registrations(store));
+    tools.extend(opengwas_registrations(opengwas));
     let mut builder = Agent::builder()
         .with_event_tx(event_tx)
         .with_tools(tools)

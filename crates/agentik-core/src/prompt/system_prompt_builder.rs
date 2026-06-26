@@ -31,7 +31,6 @@ impl SystemPromptBuilder {
             "Tool calls within a single reply execute in parallel, which greatly reduces round-trip time.\n\n",
             "## Task completion\n",
             "When all tasks are complete, output your final text directly — a response with no tool calls signals task completion. No additional termination action is needed.\n",
-            "The `attempt_complete` tool is **deprecated (legacy)**; the new flow does not require calling it. If called, it will still be processed normally.\n",
         ).to_string();
         self
     }

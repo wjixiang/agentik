@@ -49,6 +49,14 @@ pub(crate) fn event_to_parts(event: &AgentEvent) -> (&'static str, serde_json::V
             "tool_result",
             serde_json::json!({ "ok": ok, "content": content }),
         ),
+        AgentEvent::ToolCallBackground { id, name } => (
+            "tool_call_background",
+            serde_json::json!({ "id": id, "name": name }),
+        ),
+        AgentEvent::ToolBackgroundComplete { id, ok, content } => (
+            "tool_background_complete",
+            serde_json::json!({ "id": id, "ok": ok, "content": content }),
+        ),
         AgentEvent::Done => ("done", serde_json::Value::Null),
         AgentEvent::Error(msg) => ("error", serde_json::json!(msg)),
     }

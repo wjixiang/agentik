@@ -84,6 +84,8 @@ pub struct ToolResult {
     pub content: ToolResultContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<ToolEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,47 +115,25 @@ pub enum ImageSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolEffect {
-    AttemptComplete,
     Abort,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ToolCallResponseContent {
-    Text(String),
-    Image(ImageSource),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallResponse {
-    pub tool_use_id: String,
-    pub content: Vec<ToolCallResponseContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_error: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub effects: Vec<ToolEffect>,
-}
-
 impl ToolResult {
-    pub fn into_call_response(self, effects: Vec<ToolEffect>) -> ToolCallResponse {
-        let content = match self.content {
-            ToolResultContent::Text(s) => vec![ToolCallResponseContent::Text(s)],
-            ToolResultContent::Json(v) => vec![ToolCallResponseContent::Text(v.to_string())],
-            ToolResultContent::Blocks(blocks) => blocks
-                .into_iter()
-                .map(|b| match b {
-                    ToolResultBlock::Text { text } => ToolCallResponseContent::Text(text),
-                    ToolResultBlock::Image { source } => ToolCallResponseContent::Image(source),
-                })
-                .collect(),
-        };
-
-        ToolCallResponse {
-            tool_use_id: self.tool_use_id,
-            content,
-            is_error: self.is_error,
-            effects,
+    pub fn from_backend_task(tool_use_id: &str) -> Self {
+        Self {
+            tool_use_id: tool_use_id.to_string(),
+            content: ToolResultContent::Text(format!(
+                "Task '{}' is running in backend",
+                tool_use_id
+            )),
+            is_error: None,
+            effects: vec![],
         }
+    }
+
+    pub fn with_id<T: Into<String>>(mut self, id: T) -> Self {
+        self.tool_use_id = id.into();
+        self
     }
 }
 
@@ -369,6 +349,7 @@ impl ToolResult {
             tool_use_id: String::new(),
             content: ToolResultContent::Text(content.into()),
             is_error: None,
+            effects: vec![],
         }
     }
 
@@ -377,6 +358,7 @@ impl ToolResult {
             tool_use_id: String::new(),
             content: ToolResultContent::Json(content),
             is_error: None,
+            effects: vec![],
         }
     }
 
@@ -385,6 +367,7 @@ impl ToolResult {
             tool_use_id: String::new(),
             content: ToolResultContent::Text(error_message.into()),
             is_error: Some(true),
+            effects: vec![],
         }
     }
 
@@ -393,6 +376,7 @@ impl ToolResult {
             tool_use_id: String::new(),
             content: ToolResultContent::Blocks(blocks),
             is_error: None,
+            effects: vec![],
         }
     }
 
@@ -402,6 +386,23 @@ impl ToolResult {
             tool_use_id: tool_use_id.into(),
             content: ToolResultContent::Text(error_message.into()),
             is_error: Some(true),
+            effects: vec![],
+        }
+    }
+
+    /// Extract text content, joining multiple text segments. Non-text (images) are skipped.
+    pub fn text_content(&self) -> String {
+        match &self.content {
+            ToolResultContent::Text(s) => s.clone(),
+            ToolResultContent::Json(v) => v.to_string(),
+            ToolResultContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ToolResultBlock::Text { text } => Some(text.as_str()),
+                    ToolResultBlock::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
         }
     }
 }

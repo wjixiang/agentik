@@ -8,12 +8,12 @@ This project is a hard fork of [dimichgh/anthropic-sdk-rust](https://github.com/
 
 `agentik` is a Cargo workspace containing four crates:
 
-| Crate | Description |
-|---|---|
-| [`agentik-types`](crates/agentik-types) | Shared type definitions for the Anthropic API — messages, tools, batches, files, models, streaming events, agent events, errors. |
-| [`agentik-sdk`](crates/agentik-sdk) | Full-featured async client: HTTP layer, SSE streaming engine, retry/backoff, multi-provider abstraction, model pool, token counter, file utilities. |
-| [`agentik-proc`](crates/agentik-proc) | Proc-macro crate. Provides `#[derive(ToolInput)]` so tool input structs auto-generate their own JSON Schema `Tool` definition. |
-| [`agentik-core`](crates/agentik-core) | Domain-agnostic agent runtime. Plug in any `AgentContext` to specialize behavior: agent loop, memory with compaction, lifecycle, toolset, `ProcessManager`. |
+| Crate                                   | Description                                                                                                                                                 |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`agentik-types`](crates/agentik-types) | Shared type definitions for the Anthropic API — messages, tools, batches, files, models, streaming events, agent events, errors.                            |
+| [`agentik-sdk`](crates/agentik-sdk)     | Full-featured async client: HTTP layer, SSE streaming engine, retry/backoff, multi-provider abstraction, model pool, token counter, file utilities.         |
+| [`agentik-proc`](crates/agentik-proc)   | Proc-macro crate. Provides `#[derive(ToolInput)]` so tool input structs auto-generate their own JSON Schema `Tool` definition.                              |
+| [`agentik-core`](crates/agentik-core)   | Domain-agnostic agent runtime. Plug in any `AgentContext` to specialize behavior: agent loop, memory with compaction, lifecycle, toolset, `ProcessManager`. |
 
 ```
 crates/
@@ -49,7 +49,7 @@ crates/
 
 ### Agent runtime (`agentik-core`)
 
-- **Uniform agent loop** — One behavioral loop for all agents. Agent personality and tooling are configured *only* through the toolset and system prompt; no agent-specific code paths in the loop itself (see `crates/agentik-core/src/agent.rs`).
+- **Uniform agent loop** — One behavioral loop for all agents. Agent personality and tooling are configured _only_ through the toolset and system prompt; no agent-specific code paths in the loop itself (see `crates/agentik-core/src/agent.rs`).
 - **Reactive context** — `AgentContext` trait: implement `read()` / `write()`. The loop polls the version at each boundary and injects a `[context-update]` message into memory when it changes. Built-in `InMemoryAgentContext` for tests.
 - **Memory with compaction** — `Memory` keeps a rolling list of summarized `MemoryItem`s. When token pressure rises against the model's `context_length`, the oldest segment is summarized by the LLM into a `summary` and a fresh segment is opened.
 - **Toolset** — `ToolRegistration` + `Toolset` handle schema exposure, parallel dispatch, per-tool timeouts, and `ToolEffect` propagation. Every `T: ToolFunction` is auto-erased to `DynToolFunction` for heterogeneous storage.
@@ -245,12 +245,12 @@ MIMO_API_KEY="your-api-key-here"
 
 ## API Resources (SDK)
 
-| Resource | Description |
-|---|---|
+| Resource            | Description                             |
+| ------------------- | --------------------------------------- |
 | `client.messages()` | Create messages and streaming responses |
-| `client.batches()` | Manage batch inference requests |
-| `client.files()` | Upload and manage files |
-| `client.models()` | List and inspect models |
+| `client.batches()`  | Manage batch inference requests         |
+| `client.files()`    | Upload and manage files                 |
+| `client.models()`   | List and inspect models                 |
 
 ## Architecture notes
 

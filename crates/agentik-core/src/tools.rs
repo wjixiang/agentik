@@ -11,6 +11,7 @@ pub mod error;
 pub mod executor;
 pub mod function;
 pub mod registry;
+pub mod task_runtime;
 pub mod tool_provider;
 pub mod toolset;
 pub mod truncation;
@@ -23,13 +24,13 @@ pub use tool_provider::ToolProviderRegistry;
 pub use toolset::{ToolRegistration, Toolset};
 
 pub use agentik_sdk::types::{
-    ToolDefinition, ToolBuilder, ToolChoice, ToolEffect, ToolResult, ToolResultContent, ToolUse,
+    ToolBuilder, ToolChoice, ToolDefinition, ToolEffect, ToolResult, ToolResultContent, ToolUse,
     ToolValidationError,
 };
 
 // Re-export lifecycle tools at the `tools` facade so callers can do
-// `use agentik_core::tools::{AttemptCompleteTool, ...}`.
+// `use agentik_core::tools::{AbortTaskTool, ...}`.
 pub use builtins::{
-    AbortTaskInput, AbortTaskTool, AttemptCompleteInput, AttemptCompleteTool,
+    AbortTaskInput, AbortTaskTool,
     lifecycle_registrations,
 };

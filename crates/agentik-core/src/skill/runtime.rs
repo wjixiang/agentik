@@ -10,7 +10,6 @@ use super::definition::{Skill, SkillStep};
 /// Public name of the lifecycle + skill tools that are always allowed
 /// regardless of the current step's `allowed_tools`.
 pub const UPDATE_TODO_TOOL: &str = "update_todo";
-const ATTEMPT_COMPLETE_TOOL: &str = "attempt_complete";
 const ABORT_TASK_TOOL: &str = "abort_task";
 
 /// Completion status of a single todo item.
@@ -130,7 +129,7 @@ impl SkillRuntime {
             .current_step()
             .map(|s| s.allowed_tools.clone())
             .unwrap_or_default();
-        for always in [UPDATE_TODO_TOOL, ATTEMPT_COMPLETE_TOOL, ABORT_TASK_TOOL] {
+        for always in [UPDATE_TODO_TOOL, ABORT_TASK_TOOL] {
             if !names.iter().any(|n| n == always) {
                 names.push(always.to_string());
             }
@@ -275,7 +274,6 @@ mod tests {
         let allowed = rt.allowed_tools_for_current_step();
         assert!(allowed.contains(&"read".to_string()));
         assert!(allowed.contains(&UPDATE_TODO_TOOL.to_string()));
-        assert!(allowed.contains(&"attempt_complete".to_string()));
         assert!(allowed.contains(&"abort_task".to_string()));
         // write tool not yet allowed (it belongs to step 2)
         assert!(!allowed.contains(&"write".to_string()));

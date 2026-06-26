@@ -58,6 +58,13 @@ pub enum AgentEvent {
     /// A tool returned a result. `content` is the raw text from the tool.
     ToolResult { ok: bool, content: String },
 
+    /// Sync phase expired — tool is now running in the background.
+    /// `id` is the `tool_use_id`, `name` is the tool name.
+    ToolCallBackground { id: String, name: String },
+
+    /// A background tool task completed with its real result.
+    ToolBackgroundComplete { id: String, ok: bool, content: String },
+
     /// Agent finished its workflow.
     Done,
 

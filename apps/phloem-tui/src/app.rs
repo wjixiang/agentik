@@ -17,13 +17,15 @@ use agentik_runtime::AgentRuntime;
 use crate::state::{self, AgentStatus, AppState, InputMode, MainTabState};
 use crate::widgets::agent_tab_widget::AgentTabWidget;
 
-const POLL_TIMEOUT: Duration = Duration::from_millis(250);
+const POLL_TIMEOUT: Duration = Duration::from_millis(16);
 
 pub struct App {
     state: AppState,
     tab_state: TabNavState,
     agent_runtime: AgentRuntime,
     conn: Connection,
+    /// True when state has changed and a re-render is needed.
+    dirty: bool,
 }
 
 impl App {
@@ -48,6 +50,7 @@ impl App {
             tab_state: TabNavState::new(MainTabState::default().index()),
             agent_runtime,
             conn,
+            dirty: true, // render the initial frame
         }
     }
 
@@ -166,125 +169,149 @@ impl App {
 
     fn app(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         loop {
-            terminal.draw(|f| self.render(f))?;
-
-            // Poll for agent events with a timeout so we don't block forever.
+            // ── Event handling phase ──
+            // Drain all queued input events before rendering.
             if event::poll(POLL_TIMEOUT)? {
-                let event = event::read()?;
-                self.handle_event(terminal, event)?;
+                let mut scroll_delta: i32 = 0;
+                loop {
+                    let event = event::read()?;
+                    let scroll = self.handle_event(&event);
+                    scroll_delta += scroll;
+                    // Check for more events without blocking.
+                    if !event::poll(Duration::ZERO)? {
+                        break;
+                    }
+                }
+                // Apply batched scroll delta once.
+                if scroll_delta != 0 {
+                    self.apply_scroll_delta(scroll_delta);
+                }
+                self.dirty = true;
             } else {
-                // Timeout: drain any pending agent events.
-                self.drain_agent_events();
+                // Timeout: drain agent streaming events.
+                let had_events = self.drain_agent_events();
+                if had_events {
+                    self.dirty = true;
+                }
+            }
+
+            // ── Render phase (only when state changed) ──
+            if self.dirty {
+                terminal.draw(|f| self.render(f))?;
+                self.dirty = false;
             }
         }
     }
 
-    fn drain_agent_events(&mut self) {
+    fn drain_agent_events(&mut self) -> bool {
+        let mut had_events = false;
         while let Some(event) = self.agent_runtime.poll_event() {
             state::apply_event(&mut self.state.agent_tab_state, event);
+            had_events = true;
         }
+        had_events
     }
 
-    fn handle_event(
-        &mut self,
-        _terminal: &mut DefaultTerminal,
-        event: Event,
-    ) -> std::io::Result<()> {
+    /// Handle a single event. Returns a scroll delta to be accumulated.
+    fn handle_event(&mut self, event: &Event) -> i32 {
         match event {
-            Event::Key(key) if key.is_press() => {
-                // Ctrl+C: always quit
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    if !matches!(self.state.agent_tab_state.status, AgentStatus::Idle) {
-                        self.agent_runtime.cancel();
-                        return Ok(());
-                    } else {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "Ctrl+C",
-                        ));
-                    }
-                }
-
-                // Tab switching (global)
-                match key.code {
-                    // KeyCode::Tab => {
-                    //     self.tab_state
-                    //         .select_direction_wrapping(TabDirection::Next, state::TABS.len());
-                    //     self.sync_tab_state();
-                    //     return Ok(());
-                    // }
-                    // KeyCode::BackTab => {
-                    //     self.tab_state
-                    //         .select_direction_wrapping(TabDirection::Previous, state::TABS.len());
-                    //     self.sync_tab_state();
-                    //     return Ok(());
-                    // }
-                    KeyCode::Char(']') => {
-                        self.tab_state
-                            .select_direction_wrapping(TabDirection::Next, state::TABS.len());
-                        self.sync_tab_state();
-                        return Ok(());
-                    }
-                    KeyCode::Char('[') => {
-                        self.tab_state
-                            .select_direction_wrapping(TabDirection::Previous, state::TABS.len());
-                        self.sync_tab_state();
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-
-                // Delegate to active tab
-                match self.state.main_tab_state {
-                    MainTabState::AgentTab => {
-                        self.handle_agent_key(key);
-                    }
-                    MainTabState::ConfigTab => {
-                        self.handle_config_key(key);
-                    }
-                }
+            Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+                self.handle_key(key);
+                0
             }
-            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {}
-            Event::Mouse(mouse) => self.handle_mouse(mouse)?,
+            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => 0,
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Paste(s) => {
                 // Only insert paste into the input area when in input mode and agent is idle.
                 if matches!(self.state.main_tab_state, MainTabState::AgentTab) {
                     let ts = &mut self.state.agent_tab_state;
                     if ts.input_mode == InputMode::Input && ts.status == state::AgentStatus::Idle {
-                        ts.input.insert_str(&s);
+                        ts.input.insert_str(s);
                     }
                 }
+                0
             }
-            _ => {}
+            _ => 0,
         }
-        Ok(())
     }
 
     /// Handle mouse events: scroll wheel scrolls the chat in Agent tab.
-    fn handle_mouse(&mut self, mouse: MouseEvent) -> std::io::Result<()> {
+    /// Returns the scroll delta to be batched with other scroll events.
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> i32 {
         if !matches!(self.state.main_tab_state, MainTabState::AgentTab) {
-            return Ok(());
+            return 0;
         }
 
-        let ts = &mut self.state.agent_tab_state;
-        let lines_per_tick = 3;
+        let lines_per_tick: i32 = 3;
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                ts.scroll_offset = ts.scroll_offset.saturating_add(lines_per_tick);
+                let ts = &mut self.state.agent_tab_state;
                 ts.auto_scroll = false;
+                lines_per_tick
             }
             MouseEventKind::ScrollUp => {
-                ts.scroll_offset = ts.scroll_offset.saturating_sub(lines_per_tick);
+                let ts = &mut self.state.agent_tab_state;
                 ts.auto_scroll = false;
+                -lines_per_tick
+            }
+            _ => 0,
+        }
+    }
+
+    /// Apply a batched scroll delta to the agent tab.
+    fn apply_scroll_delta(&mut self, delta: i32) {
+        if !matches!(self.state.main_tab_state, MainTabState::AgentTab) {
+            return;
+        }
+        let ts = &mut self.state.agent_tab_state;
+        if delta > 0 {
+            ts.scroll_offset = ts.scroll_offset.saturating_add(delta as usize);
+        } else {
+            ts.scroll_offset = ts.scroll_offset.saturating_sub((-delta) as usize);
+        }
+    }
+
+    fn handle_key(&mut self, key: &KeyEvent) {
+        // Ctrl+C: always quit
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if !matches!(self.state.agent_tab_state.status, AgentStatus::Idle) {
+                self.agent_runtime.cancel();
+            } else {
+                std::process::exit(130);
+            }
+            return;
+        }
+
+        // Tab switching (global)
+        match key.code {
+            KeyCode::Char(']') => {
+                self.tab_state
+                    .select_direction_wrapping(TabDirection::Next, state::TABS.len());
+                self.sync_tab_state();
+                return;
+            }
+            KeyCode::Char('[') => {
+                self.tab_state
+                    .select_direction_wrapping(TabDirection::Previous, state::TABS.len());
+                self.sync_tab_state();
+                return;
             }
             _ => {}
         }
 
-        Ok(())
+        // Delegate to active tab
+        match self.state.main_tab_state {
+            MainTabState::AgentTab => {
+                self.handle_agent_key(key);
+            }
+            MainTabState::ConfigTab => {
+                self.handle_config_key(key);
+            }
+        }
     }
 
-    fn handle_agent_key(&mut self, key: KeyEvent) {
+    fn handle_agent_key(&mut self, key: &KeyEvent) {
         let ts = &mut self.state.agent_tab_state;
 
         match ts.input_mode {
@@ -294,7 +321,7 @@ impl App {
     }
 
     /// Key handling in browse mode: j/k scroll, Enter enters input mode.
-    fn handle_browse_key(&mut self, key: KeyEvent) {
+    fn handle_browse_key(&mut self, key: &KeyEvent) {
         let ts = &mut self.state.agent_tab_state;
 
         match key.code {
@@ -326,7 +353,7 @@ impl App {
     }
 
     /// Key handling in input mode: typing goes to input, Enter sends, Esc exits.
-    fn handle_input_key(&mut self, key: KeyEvent) {
+    fn handle_input_key(&mut self, key: &KeyEvent) {
         let ts = &mut self.state.agent_tab_state;
 
         match key.code {
@@ -348,7 +375,7 @@ impl App {
             // Delegate all other keys to input when idle
             _ => {
                 if ts.status == state::AgentStatus::Idle {
-                    ts.input.handle_key(key);
+                    ts.input.handle_key(*key);
                 }
             }
         }
@@ -395,7 +422,7 @@ impl App {
     /// Config tab key handling. Esc/Enter-in-form/'d'-delete need database
     /// access, so they are handled here; everything else is delegated to the
     /// widget's key handler.
-    fn handle_config_key(&mut self, key: KeyEvent) {
+    fn handle_config_key(&mut self, key: &KeyEvent) {
         let code = key.code;
         let cs = &mut self.state.config_tab_state;
 
@@ -425,7 +452,7 @@ impl App {
         }
 
         // Everything else (navigation, opening forms, typing) goes to the widget.
-        crate::widgets::config_widget::handle_config_key(&mut self.state.config_tab_state, key);
+        crate::widgets::config_widget::handle_config_key(&mut self.state.config_tab_state, *key);
     }
 
     /// Take the open provider form out of state, validate, persist, reload.

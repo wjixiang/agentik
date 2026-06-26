@@ -20,10 +20,46 @@ pub enum ToolError {
     #[error("Tool execution timed out after {seconds} seconds")]
     Timeout { seconds: u64 },
 
+    #[error("Tool execution cancelled")]
+    Cancel,
+
     /// Tool registry error.
     #[error("Tool registry error: {message}")]
     RegistryError { message: String },
 }
+
+impl Clone for ToolError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::NotFound { name } => Self::NotFound { name: name.clone() },
+            Self::ValidationFailed { message } => Self::ValidationFailed {
+                message: message.clone(),
+            },
+            Self::ExecutionFailed { source } => Self::ExecutionFailed {
+                source: Box::new(ErrorMessage(source.to_string())),
+            },
+            Self::Timeout { seconds } => Self::Timeout { seconds: *seconds },
+            Self::Cancel => Self::Cancel,
+            Self::RegistryError { message } => Self::RegistryError {
+                message: message.clone(),
+            },
+        }
+    }
+}
+
+/// A lightweight, cloneable error that preserves the display message of the
+/// original error. Used by [`ToolError::clone`] because trait objects are not
+/// cloneable.
+#[derive(Debug, Clone)]
+struct ErrorMessage(String);
+
+impl std::fmt::Display for ErrorMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ErrorMessage {}
 
 impl From<anyhow::Error> for ToolError {
     fn from(value: anyhow::Error) -> Self {

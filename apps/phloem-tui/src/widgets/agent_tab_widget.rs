@@ -46,13 +46,32 @@ impl Widget for AgentTabWidget<'_> {
         let viewport_height = chat_inner_area.height;
         ts.clamp_scroll(viewport_height);
 
+        let width = chat_inner_area.width;
+        let cache_hit = ts.cached_version == ts.messages_version
+            && ts.cached_width == width
+            && !ts.cached_lines.is_empty();
+
+        let cached = if cache_hit {
+            Some(ts.cached_lines.clone())
+        } else {
+            None
+        };
+
         let mut chat_state = ChatWidgetState::new(ts.scroll_offset);
         let chat_widget = ChatWidget {
             messages: &ts.messages,
+            cached_lines: cached,
         };
 
         chat_widget.render(chat_inner_area, buf, &mut chat_state);
         ts.content_line_count = chat_state.total_lines;
+
+        // Update cache: store freshly rendered lines if this was a cache miss.
+        if let Some(fresh) = chat_state.rendered_lines.take() {
+            ts.cached_lines = fresh;
+            ts.cached_width = width;
+            ts.cached_version = ts.messages_version;
+        }
 
         // ── Input area ──
         let running = ts.status != crate::state::AgentStatus::Idle;

@@ -81,8 +81,14 @@ pub trait ToolFunction: Send + Sync {
         Ok(())
     }
 
-    fn timeout_seconds(&self) -> u64 {
+    /// Phase 1 threshold. Tool execution will convert from synchronous into asynchronus.
+    fn sync_seconds(&self) -> u64 {
         30
+    }
+
+    /// Phase 2 timeout threshold
+    fn timeout_seconds(&self) -> u64 {
+        300
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -111,6 +117,7 @@ pub trait DynToolFunction: Send + Sync {
 
     fn validate_input(&self, input: &Value) -> Result<(), ToolError>;
 
+    fn sync_seconds(&self) -> u64;
     fn timeout_seconds(&self) -> u64;
 
     fn definition(&self) -> ToolDefinition;
@@ -126,6 +133,10 @@ impl<T: ToolFunction + ?Sized> DynToolFunction for T {
 
     fn validate_input(&self, input: &Value) -> Result<(), ToolError> {
         ToolFunction::validate_input(self, input)
+    }
+
+    fn sync_seconds(&self) -> u64 {
+        ToolFunction::sync_seconds(self)
     }
 
     fn timeout_seconds(&self) -> u64 {
@@ -162,9 +173,7 @@ mod tests {
         type Input = EchoInput;
 
         async fn run(&self, input: EchoInput) -> Result<ToolResult, ToolError> {
-            Ok(ToolResult::success(
-                format!("Echo: {}", input.message),
-            ))
+            Ok(ToolResult::success(format!("Echo: {}", input.message)))
         }
     }
 
@@ -189,4 +198,3 @@ mod tests {
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }
 }
-

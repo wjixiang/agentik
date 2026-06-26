@@ -13,14 +13,13 @@ use crate::context::ContextProvider;
 use crate::message_ext::AgentMessageExt;
 use agentik_sdk::model::model_pool::ModelPool;
 use agentik_sdk::types::messages::{ContentBlock, Message, Role};
-use agentik_sdk::types::tools::ToolUse;
+use agentik_sdk::types::tools::{ToolResultContent, ToolUse};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, event, span};
 use uuid::Uuid;
 
-use agentik_sdk::types::ToolCallResponseContent;
-use agentik_sdk::types::{AgentEvent, ToolCallResponse};
+use agentik_sdk::types::AgentEvent;
 
 use crate::prompt::system_prompt_builder;
 use crate::tools::ToolEffect;
@@ -160,7 +159,7 @@ impl Agent {
     }
 
     pub fn lifecycle_status(&self) -> agentik_types::AgentLifecycleStatus {
-        self.lifecycle.status().clone()
+        *self.lifecycle.status()
     }
 
     pub fn is_running(&self) -> bool {
@@ -204,7 +203,7 @@ impl Agent {
         let mut retry_feedback: Option<String> = None;
         let cancelled = self.cancel_token.clone();
 
-        while self.lifecycle.is_running()
+        'outer: while self.lifecycle.is_running()
             && iteration < self.config.max_iterations
             && !self.cancel_token.is_cancelled()
         {
@@ -219,6 +218,45 @@ impl Agent {
                         Ok(()) => {
                             consecutive_retries = 0;
                             self.snapshot().await;
+
+                            // Poll background tasks: if any completed, inject
+                            // the real result into memory and loop back to
+                            // re-enter agent_workflow (which will call the LLM
+                            // again with the real result).
+                            while self.toolset.has_background_tasks().await {
+                                let completed = self
+                                    .toolset
+                                    .poll_completed_tasks()
+                                    .await;
+                                if !completed.is_empty() {
+                                    for (id, ok, content) in &completed {
+                                        self.send_event(
+                                            agentik_sdk::types::AgentEvent::ToolBackgroundComplete {
+                                                id: id.clone(),
+                                                ok: *ok,
+                                                content: content.clone(),
+                                            },
+                                        );
+                                        self.memory.remember(Message::tool_result(
+                                            id.clone(),
+                                            content.clone(),
+                                            !ok,
+                                        ))?;
+                                    }
+                                    // Re-enter agent_workflow with the new results.
+                                    continue 'outer;
+                                }
+                                // No completions yet — brief sleep, race against cancel.
+                                tokio::select! {
+                                    _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                                    _ = cancelled.cancelled() => {
+                                        self.lifecycle.set_aborted();
+                                        self.snapshot().await;
+                                        self.send_event(AgentEvent::Error("Task cancelled by user".into()));
+                                        return Err(AgentError::Cancelled);
+                                    }
+                                }
+                            }
                         }
                         Err(AgentError::CompactionRebuild) => {
                             tracing::info!("compaction rebuild, re-entering workflow");
@@ -347,34 +385,30 @@ impl Agent {
         tracing::debug!(?tool_results, "tool execution results");
 
         for tr in &tool_results {
-            let result_text: String = tr
-                .content
-                .iter()
-                .filter_map(|c| match c {
-                    ToolCallResponseContent::Text(t) => Some(t.as_str()),
-                    ToolCallResponseContent::Image(_) => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            self.send_event(agentik_sdk::types::AgentEvent::ToolResult {
-                ok: !tr.is_error.unwrap_or_default(),
-                content: result_text,
-            });
+            let is_placeholder = matches!(&tr.content, ToolResultContent::Text(t) if t.contains("is running in backend"));
+            if is_placeholder {
+                // Find the original tool name from toolcalls by matching id.
+                let name = toolcalls
+                    .iter()
+                    .find(|tc| tc.id == tr.tool_use_id)
+                    .map(|tc| tc.name.as_str())
+                    .unwrap_or("unknown");
+                self.send_event(agentik_sdk::types::AgentEvent::ToolCallBackground {
+                    id: tr.tool_use_id.clone(),
+                    name: name.to_string(),
+                });
+            } else {
+                self.send_event(agentik_sdk::types::AgentEvent::ToolResult {
+                    ok: !tr.is_error.unwrap_or_default(),
+                    content: tr.text_content(),
+                });
+            }
         }
 
         for tr in &tool_results {
-            let text: String = tr
-                .content
-                .iter()
-                .filter_map(|c| match c {
-                    ToolCallResponseContent::Text(t) => Some(t.as_str()),
-                    ToolCallResponseContent::Image(_) => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
             self.memory.remember(Message::tool_result(
                 tr.tool_use_id.clone(),
-                text,
+                tr.text_content(),
                 tr.is_error.unwrap_or_default(),
             ))?;
         }
@@ -403,16 +437,13 @@ impl Agent {
     }
 
     /// Apply agent-level effects declared by tool results (e.g. lifecycle transitions).
-    async fn handle_effect(&mut self, tool_results: &[ToolCallResponse]) {
+    async fn handle_effect(&mut self, tool_results: &[agentik_sdk::types::tools::ToolResult]) {
         let effects: Vec<ToolEffect> = tool_results
             .iter()
             .flat_map(|ts| ts.effects.clone())
             .collect();
 
         effects.iter().for_each(|e| match e {
-            ToolEffect::AttemptComplete => {
-                self.lifecycle.set_idle();
-            }
             ToolEffect::Abort => {
                 self.lifecycle.set_aborted();
             }

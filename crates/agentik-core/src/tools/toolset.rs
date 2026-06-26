@@ -1,11 +1,16 @@
-use std::collections::HashMap;
+use futures::future::join_all;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
+
+use crate::tools::task_runtime::{TaskStatus, WaitResult};
 
 use super::DynToolFunction;
 use super::error::ToolError;
+use super::task_runtime::TaskEntry;
 use agentik_sdk::types::ToolDefinition;
-use agentik_sdk::types::ToolCallResponse;
 use agentik_sdk::types::ToolEffect;
 use agentik_sdk::types::tools::{ToolResult, ToolUse};
 
@@ -46,6 +51,7 @@ impl<T: super::ToolFunction + 'static> From<T> for ToolRegistration {
 
 pub struct Toolset {
     tools: HashMap<String, ToolRegistration>,
+    tasks: Arc<Mutex<Vec<TaskEntry>>>,
 }
 
 impl Default for Toolset {
@@ -58,6 +64,7 @@ impl Toolset {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -87,69 +94,144 @@ impl Toolset {
         &self,
         toolcalls: &[ToolUse],
         allowed_tools: Option<&[String]>,
-    ) -> Result<Vec<ToolCallResponse>, ToolError> {
-        let mut results = Vec::with_capacity(toolcalls.len());
+    ) -> Result<Vec<ToolResult>, ToolError> {
+        let mut effects_map: HashMap<String, Vec<ToolEffect>> = HashMap::new();
+        let mut immediate_results: Vec<ToolResult> = Vec::new();
+
         for tc in toolcalls {
             // 当 allowed_tools 存在时，跳过不在白名单内的工具
-            if let Some(allowed) = allowed_tools {
-                if !allowed.contains(&tc.name) {
-                    let response = ToolResult::error_with_id(
-                        tc.id.clone(),
-                        format!("tool '{}' is not available in current skill context", tc.name),
-                    );
-                    results.push(response.into_call_response(vec![]));
-                    continue;
-                }
+            if let Some(allowed) = allowed_tools
+                && !allowed.contains(&tc.name)
+            {
+                immediate_results.push(ToolResult::error_with_id(
+                    tc.id.clone(),
+                    format!(
+                        "tool '{}' is not available in current skill context",
+                        tc.name
+                    ),
+                ));
+                continue;
             }
 
             let Some(registration) = self.tools.get(&tc.name) else {
                 continue;
             };
             let effects = registration.effects.clone();
+            effects_map.insert(tc.id.clone(), effects);
 
-            // NOTE: Remove SDK side input validation
-            //
-            // if let Err(e) = registration.definition.validate_input(&tc.input) {
-            //     let response = ToolResult::error(tc.id.clone(), e.to_string());
-            //     results.push(response.into_call_response(effects));
-            //     continue;
-            // }
             if let Err(e) = registration.implementation.validate_input(&tc.input) {
-                let response = ToolResult::error_with_id(tc.id.clone(), e.to_string());
-                results.push(response.into_call_response(effects));
+                let mut result = ToolResult::error_with_id(tc.id.clone(), e.to_string());
+                result.effects = effects_map.remove(&tc.id).unwrap_or_default();
+                immediate_results.push(result);
                 continue;
             }
 
+            let sync_secs = registration.implementation.sync_seconds();
             let timeout_secs = registration.implementation.timeout_seconds();
 
-            // Troubleshot Timeout error early
-            let exec_result: Result<ToolResult, ToolError> = timeout(
-                Duration::from_secs(timeout_secs),
-                registration.implementation.execute(tc.input.clone()),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(ToolError::Timeout {
-                    seconds: timeout_secs,
-                })
+            let implementation = registration.implementation.clone();
+            let input = tc.input.clone();
+            let task_id = tc.id.clone();
+
+            let cancel_token = CancellationToken::new();
+            let cancel = cancel_token.clone();
+            let tasks_ref = self.tasks.clone();
+            let mut tasks = tasks_ref.lock().await;
+
+            let task_handle = tokio::spawn(async move {
+                let result = tokio::select! {
+                    r = implementation.execute(input) => r,
+                    _ = cancel.cancelled() => Err(ToolError::Cancel),
+                    _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => Err(ToolError::Timeout { seconds: timeout_secs }),
+                };
+                // Set tool_use_id at result construction time
+                match result {
+                    Ok(mut tool_result) => {
+                        tool_result.tool_use_id = task_id;
+                        Ok(tool_result)
+                    }
+                    Err(e) => Err(e),
+                }
             });
 
-            let tool_result = match exec_result {
-                Ok(mut r) => {
-                    r.tool_use_id = tc.id.clone();
-                    r
-                }
-                Err(e) => ToolResult::error_with_id(tc.id.clone(), e.to_string()),
-            };
-
-            results.push(tool_result.into_call_response(effects));
+            tasks.push(TaskEntry::new(
+                tc.id.clone(),
+                task_handle,
+                cancel_token,
+                sync_secs,
+            ));
         }
+
+        let tasks_ref = self.tasks.clone();
+        let mut tasks = tasks_ref.lock().await;
+
+        let wait_results = join_all(tasks.iter_mut().map(|t| t.wait())).await;
+
+        let mut should_retain_task_ids: HashSet<String> = HashSet::new();
+        let mut results: Vec<ToolResult> = wait_results
+            .iter()
+            .map(|r| {
+                let (task_id, mut result) = match r {
+                    WaitResult::Done(tool_result) => {
+                        (tool_result.tool_use_id.clone(), tool_result.clone())
+                    }
+                    WaitResult::StillRunning(id) => {
+                        should_retain_task_ids.insert(id.clone());
+                        (id.clone(), ToolResult::from_backend_task(id))
+                    }
+                    WaitResult::Failed(tool_result) => {
+                        (tool_result.tool_use_id.clone(), tool_result.clone())
+                    }
+                };
+                result.effects = effects_map.remove(&task_id).unwrap_or_default();
+                result
+            })
+            .collect();
+
+        results.extend(immediate_results);
+
+        // Clear finished tasks
+        tasks.retain(|t| should_retain_task_ids.contains(t.id()));
 
         Ok(results)
     }
 
     pub fn tools(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|r| r.definition.clone()).collect()
+    }
+
+    /// Poll for completed background tasks. Returns `(tool_use_id, ok, content)`
+    /// for each finished task and removes them from the internal task list.
+    /// Failed tasks are treated as error results and also removed.
+    pub async fn poll_completed_tasks(&self) -> Vec<(String, bool, String)> {
+        let mut tasks = self.tasks.lock().await;
+        let mut completed = Vec::new();
+        tasks.retain(|entry| {
+            match entry.status() {
+                TaskStatus::Done(ref result) => {
+                    completed.push((
+                        result.tool_use_id.clone(),
+                        !result.is_error.unwrap_or_default(),
+                        result.text_content(),
+                    ));
+                    false
+                }
+                TaskStatus::Failed(ref err) => {
+                    // Treat failure as an error result.
+                    let id = entry.id().to_string();
+                    completed.push((id, false, err.to_string()));
+                    false
+                }
+                _ => true, // still running
+            }
+        });
+        completed
+    }
+
+    /// Check whether any background tasks are still running.
+    pub async fn has_background_tasks(&self) -> bool {
+        let tasks = self.tasks.lock().await;
+        !tasks.is_empty()
     }
 
     /// Return tool definitions, optionally restricted to a name whitelist.
@@ -173,11 +255,11 @@ impl Toolset {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-    use serde_json::{Value, json};
     use crate::tools::ToolFunction;
     use agentik_sdk::types::ToolEffect;
     use agentik_sdk::types::tools::{ToolBuilder, ToolUse};
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
 
     use super::{ToolRegistration, Toolset};
 
@@ -201,9 +283,7 @@ mod tests {
             &self,
             _input: Value,
         ) -> Result<crate::tools::ToolResult, crate::tools::error::ToolError> {
-            Ok(crate::tools::ToolResult::success(
-                self.result_text.clone(),
-            ))
+            Ok(crate::tools::ToolResult::success(self.result_text.clone()))
         }
     }
 
@@ -258,20 +338,20 @@ mod tests {
         let mut toolset = Toolset::new();
         toolset
             .register(mock_registration(
-                "attempt_complete",
-                "Complete current task",
-                vec![ToolEffect::AttemptComplete],
+                "abort_task",
+                "Abort current task",
+                vec![ToolEffect::Abort],
             ))
             .unwrap();
 
         let tool_call = ToolUse {
             id: "tc2".to_string(),
-            name: "attempt_complete".to_string(),
-            input: json!({ "reason": "task done" }),
+            name: "abort_task".to_string(),
+            input: json!({ "reason": "task aborted" }),
         };
 
         let results = toolset.execute(&[tool_call], None).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].effects, vec![ToolEffect::AttemptComplete]);
+        assert_eq!(results[0].effects, vec![ToolEffect::Abort]);
     }
 }

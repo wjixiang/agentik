@@ -125,6 +125,7 @@ mod tests {
                 tool_use_id: "dummy".to_string(),
                 content: ToolResultContent::Text(format!("dummy: {}", input.reason)),
                 is_error: None,
+                effects: vec![],
             })
         }
     }
@@ -152,8 +153,8 @@ mod tests {
         assert!(names.contains(&"dummy_tool".to_string()));
     }
 
-    #[test]
-    fn test_build_toolset() {
+    #[tokio::test]
+    async fn test_build_toolset() {
         let mut reg = ToolProviderRegistry::new();
         reg.register(make_reg());
 
@@ -163,19 +164,19 @@ mod tests {
         assert_eq!(tools[0].name, "dummy_tool");
     }
 
-    #[test]
-    fn test_build_toolset_with_lifecycle() {
+    #[tokio::test]
+    async fn test_build_toolset_with_lifecycle() {
         let mut reg = ToolProviderRegistry::new();
         reg.register(make_reg());
 
         let toolset = reg.build_toolset(&["dummy_tool".to_string()], true);
         let tools = toolset.tools();
-        // dummy_tool + attempt_complete + abort_task
-        assert_eq!(tools.len(), 3);
+        // dummy_tool + abort_task
+        assert_eq!(tools.len(), 2);
     }
 
-    #[test]
-    fn test_build_toolset_skips_missing() {
+    #[tokio::test]
+    async fn test_build_toolset_skips_missing() {
         let reg = ToolProviderRegistry::new();
         let toolset = reg.build_toolset(&["nonexistent".to_string()], false);
         assert_eq!(toolset.tools().len(), 0);

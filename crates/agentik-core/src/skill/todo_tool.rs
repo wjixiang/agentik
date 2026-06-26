@@ -115,6 +115,7 @@ impl ToolFunction for TodoUpdateTool {
             tool_use_id: String::new(),
             content: ToolResultContent::Text(text),
             is_error: None,
+            effects: vec![],
         })
     }
 }

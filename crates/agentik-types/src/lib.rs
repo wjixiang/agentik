@@ -33,7 +33,7 @@ pub use tools::{
     ToolResultBlock, ToolInputSchema, ToolValidationError,
     ServerTool, WebSearchParameters,
     ImageSource as ToolImageSource,
-    ToolEffect, ToolCallResponseContent, ToolCallResponse,
+    ToolEffect,
     ToolInput,
 };
 

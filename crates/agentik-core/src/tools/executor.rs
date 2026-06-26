@@ -222,6 +222,7 @@ impl ToolExecutor {
             ToolError::ValidationFailed { .. } => false, // Don't retry validation errors
             ToolError::NotFound { .. } => false,         // Don't retry missing tools
             ToolError::RegistryError { .. } => false,    // Don't retry registry errors
+            ToolError::Cancel => false,                  // Don't retry cancellations
         }
     }
 

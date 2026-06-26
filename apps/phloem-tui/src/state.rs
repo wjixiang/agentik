@@ -1,6 +1,7 @@
 use crate::config_db::{ModelInput, ProviderInput, ProviderRow};
 use crate::widgets::input_area::{InputArea, InputState};
 use agentik_sdk::types::AgentEvent;
+use ratatui::text::Line;
 
 pub const TABS: &[&str] = &["Agent", "Config"];
 
@@ -40,6 +41,8 @@ pub enum ChatLine {
     Thinking(String),
     ToolCall { name: String, input: String },
     ToolResult { ok: bool, content: String },
+    /// Tool is running in the background (sync phase expired).
+    ToolBackground { id: String, name: String },
     Error(String),
     Separator,
 }
@@ -73,6 +76,14 @@ pub struct AgentTabState {
     pub auto_scroll: bool,
     /// Cached total rendered line count (updated every frame).
     pub content_line_count: usize,
+    /// Pre-rendered lines cache, rebuilt only when messages change.
+    pub cached_lines: Vec<Line<'static>>,
+    /// The `messages_version` at which `cached_lines` was built.
+    pub cached_version: u64,
+    /// The terminal width at which `cached_lines` was built.
+    pub cached_width: u16,
+    /// Monotonic counter bumped on every message mutation; used to detect cache staleness.
+    pub messages_version: u64,
 }
 
 impl Default for AgentTabState {
@@ -87,6 +98,10 @@ impl Default for AgentTabState {
             input_mode: InputMode::Browse,
             auto_scroll: true,
             content_line_count: 0,
+            cached_lines: Vec::new(),
+            cached_version: 0,
+            cached_width: 0,
+            messages_version: 0,
         }
     }
 }
@@ -107,6 +122,7 @@ impl AgentTabState {
     /// Push a user message and a separator after the previous assistant response.
     pub fn push_user_message(&mut self, text: String) {
         self.messages.push(ChatLine::User(text));
+        self.messages_version += 1;
     }
 
     /// Re-enable auto-scroll so the next `clamp_scroll` call pins to the bottom.
@@ -157,6 +173,7 @@ pub fn apply_event(state: &mut AgentTabState, event: AgentEvent) {
             } else {
                 state.messages.push(ChatLine::Assistant(text));
             }
+            state.messages_version += 1;
             state.scroll_to_bottom();
         }
         AgentEvent::ThinkingDelta(text) => {
@@ -171,6 +188,7 @@ pub fn apply_event(state: &mut AgentTabState, event: AgentEvent) {
             } else {
                 state.messages.push(ChatLine::Thinking(text));
             }
+            state.messages_version += 1;
             state.scroll_to_bottom();
         }
         AgentEvent::UsageUpdate {
@@ -194,19 +212,33 @@ pub fn apply_event(state: &mut AgentTabState, event: AgentEvent) {
                 name,
                 input: input.to_string(),
             });
+            state.messages_version += 1;
             state.scroll_to_bottom();
         }
         AgentEvent::ToolResult { ok, content } => {
             state.messages.push(ChatLine::ToolResult { ok, content });
+            state.messages_version += 1;
+            state.scroll_to_bottom();
+        }
+        AgentEvent::ToolCallBackground { id, name } => {
+            state.messages.push(ChatLine::ToolBackground { id, name });
+            state.messages_version += 1;
+            state.scroll_to_bottom();
+        }
+        AgentEvent::ToolBackgroundComplete { id: _id, ok, content } => {
+            state.messages.push(ChatLine::ToolResult { ok, content });
+            state.messages_version += 1;
             state.scroll_to_bottom();
         }
         AgentEvent::Done => {
             state.status = AgentStatus::Idle;
             state.messages.push(ChatLine::Separator);
+            state.messages_version += 1;
             state.scroll_to_bottom();
         }
         AgentEvent::Error(msg) => {
             state.messages.push(ChatLine::Error(msg));
+            state.messages_version += 1;
             state.scroll_to_bottom();
             state.status = AgentStatus::Idle;
         }

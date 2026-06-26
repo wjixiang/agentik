@@ -5,7 +5,7 @@ use agentik_sdk::types::ToolResult as AgentToolResult;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::EutilsClient;
+use crate::{EutilsClient, format::format_esummary};
 
 #[derive(Debug, Deserialize, Serialize, agentik_proc::ToolInput)]
 #[tool(
@@ -48,6 +48,6 @@ impl ToolFunction for PubmedSummaryTool {
             .await
             .map_err(super::json_err)?;
 
-        Ok(AgentToolResult::success_json(result))
+        Ok(AgentToolResult::success(format_esummary(&result)))
     }
 }

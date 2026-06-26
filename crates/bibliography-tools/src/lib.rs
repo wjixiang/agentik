@@ -10,6 +10,7 @@
 
 pub mod common;
 pub mod detail;
+pub mod format;
 pub mod search;
 
 pub use agentik_core::tools::ToolRegistration;

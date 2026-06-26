@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{call_bridge, err};
+use crate::format::format_detail;
 
 #[derive(Debug, Deserialize, Serialize, agentik_proc::ToolInput)]
 #[tool(
@@ -38,7 +39,7 @@ impl ToolFunction for ArticleDetailTool {
         let response = call_bridge(&payload).await.map_err(err)?;
 
         match (response.ok, response.data, response.error) {
-            (true, Some(data), _) => Ok(ToolResult::success_json(data)),
+            (true, Some(data), _) => Ok(ToolResult::success(format_detail(&data))),
             (false, _, Some(error)) => Ok(ToolResult::error(error)),
             _ => Ok(ToolResult::error("unexpected bridge response".to_string())),
         }

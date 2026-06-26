@@ -5,7 +5,7 @@ use agentik_sdk::types::ToolResult as AgentToolResult;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::EutilsClient;
+use crate::{EutilsClient, format::format_efetch};
 
 #[derive(Debug, Deserialize, Serialize, agentik_proc::ToolInput)]
 #[tool(
@@ -70,6 +70,6 @@ impl ToolFunction for PubmedFetchTool {
             serde_json::Value::String(rettype.to_owned()),
         );
         map.insert("content".into(), serde_json::Value::String(text));
-        Ok(AgentToolResult::success_json(serde_json::Value::Object(map)))
+        Ok(AgentToolResult::success(format_efetch(&serde_json::Value::Object(map))))
     }
 }

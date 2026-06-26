@@ -5,7 +5,7 @@ use agentik_sdk::types::ToolResult as AgentToolResult;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::EutilsClient;
+use crate::{EutilsClient, format::format_einfo};
 
 #[derive(Debug, Deserialize, Serialize, agentik_proc::ToolInput)]
 #[tool(
@@ -39,6 +39,6 @@ impl ToolFunction for EInfoTool {
             .await
             .map_err(super::json_err)?;
 
-        Ok(AgentToolResult::success_json(serde_json::to_value(result)?))
+        Ok(AgentToolResult::success(format_einfo(&serde_json::to_value(result)?)))
     }
 }

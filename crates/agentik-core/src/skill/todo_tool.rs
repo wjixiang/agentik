@@ -2,8 +2,7 @@
 //! skill workflow progress. It mutates the shared [`SkillRuntime`]
 //! and reports the resulting [`StepTransition`] as text.
 //!
-//! No new [`ToolEffect`](crate::tools::ToolEffect) is introduced: the
-//! state change happens directly through the shared `Arc<Mutex<...>>`,
+//! The state change happens directly through the shared `Arc<Mutex<...>>`,
 //! and the agent's existing tool-result event emission surfaces the
 //! progress text to observers.
 
@@ -115,7 +114,6 @@ impl ToolFunction for TodoUpdateTool {
             tool_use_id: String::new(),
             content: ToolResultContent::Text(text),
             is_error: None,
-            effects: vec![],
         })
     }
 }
@@ -169,8 +167,9 @@ mod tests {
     async fn end_to_end_via_toolset_advances_step() {
         let (runtime, todo_reg) = crate::skill::instantiate(demo_skill());
 
-        let mut toolset = Toolset::default();
-        for reg in lifecycle_registrations() {
+        let mut toolset = Toolset::new(Some(tokio::sync::mpsc::unbounded_channel::<agentik_sdk::types::AgentEvent>().0));
+        let tx = tokio::sync::mpsc::unbounded_channel().0;
+        for reg in lifecycle_registrations(tx) {
             toolset.register(reg).unwrap();
         }
         toolset.register(todo_reg).unwrap();
@@ -186,7 +185,7 @@ mod tests {
             input: json!({ "index": 0, "status": "completed" }),
         };
         let results = toolset
-            .execute(std::slice::from_ref(&tc), Some(&allowed))
+            .execute(std::slice::from_ref(&tc), Some(&allowed), None)
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -203,7 +202,7 @@ mod tests {
             input: json!({ "index": 0, "status": "completed" }),
         };
         let _ = toolset
-            .execute(std::slice::from_ref(&tc2), Some(&allowed2))
+            .execute(std::slice::from_ref(&tc2), Some(&allowed2), None)
             .await
             .unwrap();
         assert!(runtime.lock().await.is_complete());

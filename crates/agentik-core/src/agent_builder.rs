@@ -23,8 +23,6 @@ pub struct AgentBuilder {
     system_prompt_section: Option<String>,
     system_prompt_identity: Option<String>,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<agentik_sdk::types::AgentEvent>>,
-    /// Pre-built toolset — when set, skips automatic tool registration.
-    prebuilt_toolset: Option<Toolset>,
     /// Stable agent UUID. If `None`, a fresh v4 UUID is generated at build time.
     id: Option<Uuid>,
     /// Pre-built memory (used to restore from a snapshot). When set, overrides
@@ -47,7 +45,6 @@ impl Clone for AgentBuilder {
             system_prompt_section: self.system_prompt_section.clone(),
             system_prompt_identity: self.system_prompt_identity.clone(),
             event_tx: self.event_tx.clone(),
-            prebuilt_toolset: None,
             id: self.id,
             memory: self.memory.clone(),
             skill: self.skill.clone(),
@@ -68,7 +65,6 @@ impl AgentBuilder {
             system_prompt_section: None,
             system_prompt_identity: None,
             event_tx: None,
-            prebuilt_toolset: None,
             id: None,
             memory: None,
             skill: None,
@@ -142,14 +138,6 @@ impl AgentBuilder {
         self
     }
 
-    /// Provide a pre-built toolset. When set, the builder skips automatic
-    /// tool registration (lifecycle + `with_tools`) and uses this toolset
-    /// directly.
-    pub fn with_toolset(mut self, toolset: Toolset) -> Self {
-        self.prebuilt_toolset = Some(toolset);
-        self
-    }
-
     /// Override the agent's UUID. By default a fresh v4 UUID is generated.
     /// Use a stable id to persist an agent's identity across restarts.
     pub fn with_id(mut self, id: Uuid) -> Self {
@@ -177,16 +165,19 @@ impl AgentBuilder {
         // Instantiate the skill runtime (if any) and its `update_todo` tool.
         let skill_runtime = self.skill.take().map(skill::instantiate);
 
-        // Build toolset: use prebuilt if provided, otherwise auto-register.
-        let mut toolset = if let Some(toolset) = self.prebuilt_toolset {
-            toolset
-        } else {
-            let mut toolset = Toolset::default();
-            toolset.register_all(crate::tools::lifecycle_registrations())?;
-            toolset.register_all(self.tools)?;
-            toolset.register_all(crate::tools::task_registrations(toolset.tasks_handle()))?;
-            toolset
-        };
+        // Internal event channel — created early so the lifecycle tools
+        // (e.g. `abort_task`) can hold a clone of the sender. tx is also
+        // handed to the external runtime, rx is consumed once by Agent::run().
+        let (internal_event_tx, internal_event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Register the toolset: lifecycle (abort_task etc.), caller-supplied
+        // external tools, and background-task tools.
+        let mut toolset = Toolset::new(self.event_tx.clone());
+        toolset.register_all(crate::tools::lifecycle_registrations(
+            internal_event_tx.clone(),
+        ))?;
+        toolset.register_all(self.tools)?;
+        toolset.register_all(crate::tools::task_registrations(toolset.tasks_handle()))?;
 
         // Register the skill's todo tool so the agent can drive progress.
         if let Some((_, todo_reg)) = &skill_runtime {
@@ -205,12 +196,7 @@ impl AgentBuilder {
         };
 
         // CancellationToken
-        let cancel_token = self.cancel_token.unwrap_or_else(CancellationToken::new);
-
-        // Internal event channel — tx is handed to the external runtime,
-        // rx is consumed once by Agent::run().
-        let (internal_event_tx, internal_event_rx) =
-            tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = self.cancel_token.unwrap_or_default();
 
         Ok(Agent {
             id: self.id.unwrap_or_else(Uuid::new_v4),

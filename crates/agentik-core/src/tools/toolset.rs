@@ -1,36 +1,34 @@
+use agentik_types::AgentEvent;
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use crate::tools::task_runtime::TaskStatus;
+use crate::tools::task_runtime::{TaskStatus, WaitResultKind};
 
 use super::DynToolFunction;
 use super::error::ToolError;
 use super::task_runtime::TaskEntry;
 use agentik_sdk::types::ToolDefinition;
-use agentik_sdk::types::ToolEffect;
 use agentik_sdk::types::tools::{ToolResult, ToolUse};
 
 #[derive(Clone)]
 pub struct ToolRegistration {
     pub definition: ToolDefinition,
     pub implementation: std::sync::Arc<dyn DynToolFunction>,
-    pub effects: Vec<ToolEffect>,
 }
 
 impl ToolRegistration {
     pub fn new(
         definition: ToolDefinition,
         implementation: std::sync::Arc<dyn DynToolFunction>,
-        effects: Vec<ToolEffect>,
     ) -> Self {
         Self {
             definition,
             implementation,
-            effects,
         }
     }
 }
@@ -38,33 +36,33 @@ impl ToolRegistration {
 impl<T: super::ToolFunction + 'static> From<T> for ToolRegistration {
     fn from(tool: T) -> Self {
         let definition = tool.definition();
-        let effects = tool.effects();
         Self {
             definition,
             // T: ToolFunction implies T: DynToolFunction via the blanket impl,
             // so this coercion is automatic.
             implementation: std::sync::Arc::new(tool),
-            effects,
         }
     }
 }
 
 pub struct Toolset {
     tools: HashMap<String, ToolRegistration>,
-    tasks: Arc<Mutex<Vec<TaskEntry>>>,
+    tasks: Arc<RwLock<Vec<TaskEntry>>>,
+    agent_event_tx: Option<UnboundedSender<AgentEvent>>,
 }
 
-impl Default for Toolset {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// impl Default for Toolset {
+//     fn default() -> Self {
+//         Self::new()
+//     }
+// }
 
 impl Toolset {
-    pub fn new() -> Self {
+    pub fn new(agent_event_tx: Option<UnboundedSender<AgentEvent>>) -> Self {
         Self {
             tools: HashMap::new(),
-            tasks: Arc::new(Mutex::new(Vec::new())),
+            tasks: Arc::new(RwLock::new(Vec::new())),
+            agent_event_tx,
         }
     }
 
@@ -94,7 +92,7 @@ impl Toolset {
     ///
     /// Used by builtin tools (e.g. `view_task_results`) that need to
     /// inspect background tasks without going through the agent loop.
-    pub fn tasks_handle(&self) -> Arc<Mutex<Vec<TaskEntry>>> {
+    pub fn tasks_handle(&self) -> Arc<RwLock<Vec<TaskEntry>>> {
         self.tasks.clone()
     }
 
@@ -104,8 +102,11 @@ impl Toolset {
         allowed_tools: Option<&[String]>,
         notify_tx: Option<super::task_runtime::BgTaskNotifyTx>,
     ) -> Result<Vec<ToolResult>, ToolError> {
-        let mut effects_map: HashMap<String, Vec<ToolEffect>> = HashMap::new();
         let mut immediate_results: Vec<ToolResult> = Vec::new();
+        // Tool name for each task spawned *in this call*, keyed by `tool_use_id`.
+        // We only emit `ToolCallBackground` for newly spawned tasks — retained
+        // background tasks from a prior call already announced themselves.
+        let mut spawned_names: HashMap<String, String> = HashMap::new();
 
         for tc in toolcalls {
             // 当 allowed_tools 存在时，跳过不在白名单内的工具
@@ -125,13 +126,9 @@ impl Toolset {
             let Some(registration) = self.tools.get(&tc.name) else {
                 continue;
             };
-            let effects = registration.effects.clone();
-            effects_map.insert(tc.id.clone(), effects);
 
             if let Err(e) = registration.implementation.validate_input(&tc.input) {
-                let mut result = ToolResult::error_with_id(tc.id.clone(), e.to_string());
-                result.effects = effects_map.remove(&tc.id).unwrap_or_default();
-                immediate_results.push(result);
+                immediate_results.push(ToolResult::error_with_id(tc.id.clone(), e.to_string()));
                 continue;
             }
 
@@ -145,7 +142,7 @@ impl Toolset {
             let cancel_token = CancellationToken::new();
             let cancel = cancel_token.clone();
             let tasks_ref = self.tasks.clone();
-            let mut tasks = tasks_ref.lock().await;
+            let mut tasks = tasks_ref.write().await;
 
             let task_handle = tokio::spawn(async move {
                 let result = tokio::select! {
@@ -165,28 +162,37 @@ impl Toolset {
 
             tasks.push(TaskEntry::with_notify(
                 tc.id.clone(),
+                tc.name.clone(),
                 task_handle,
                 cancel_token,
                 sync_secs,
                 notify_tx.clone(),
             ));
+            spawned_names.insert(tc.id.clone(), tc.name.clone());
         }
 
         let tasks_ref = self.tasks.clone();
-        let mut tasks = tasks_ref.lock().await;
+        let mut tasks = tasks_ref.write().await;
 
         let wait_results = join_all(tasks.iter_mut().map(|t| t.wait())).await;
 
-        let mut results: Vec<ToolResult> = wait_results
-            .into_iter()
-            .map(|r| {
-                let mut result: ToolResult = r.into();
-
-                // NOTE: replace effect symbol with tokio::watch
-                result.effects = effects_map.remove(&result.tool_use_id).unwrap_or_default();
-                result
-            })
-            .collect();
+        let mut results: Vec<ToolResult> = Vec::with_capacity(wait_results.len());
+        for wait_result in wait_results {
+            // When a tool didn't finish within its sync window, it is now
+            // running in the background — notify observers immediately. Only
+            // announce tasks spawned in this call; retained background tasks
+            // from a prior turn already announced themselves.
+            if let WaitResultKind::StillRunning(ref id) = wait_result.inner
+                && let Some(name) = spawned_names.get(id)
+                && let Some(tx) = &self.agent_event_tx
+            {
+                let _ = tx.send(AgentEvent::ToolCallBackground {
+                    id: id.clone(),
+                    name: name.clone(),
+                });
+            }
+            results.push(wait_result.into());
+        }
 
         results.extend(immediate_results);
 
@@ -205,7 +211,7 @@ impl Toolset {
     /// for each finished task and removes them from the internal task list.
     /// Failed tasks are treated as error results and also removed.
     pub async fn poll_completed_tasks(&self) -> Vec<(String, bool, String)> {
-        let mut tasks = self.tasks.lock().await;
+        let mut tasks = self.tasks.write().await;
         let mut completed = Vec::new();
         tasks.retain(|entry| {
             match entry.status() {
@@ -231,7 +237,7 @@ impl Toolset {
 
     /// Check whether any background tasks are still running.
     pub async fn has_background_tasks(&self) -> bool {
-        let tasks = self.tasks.lock().await;
+        let tasks = self.tasks.read().await;
         !tasks.is_empty()
     }
 
@@ -257,10 +263,11 @@ impl Toolset {
 #[cfg(test)]
 mod tests {
     use crate::tools::ToolFunction;
-    use agentik_sdk::types::ToolEffect;
     use agentik_sdk::types::tools::{ToolBuilder, ToolUse};
+    use agentik_types::AgentEvent;
     use async_trait::async_trait;
     use serde_json::{Value, json};
+    use tokio::sync::mpsc;
 
     use super::{ToolRegistration, Toolset};
 
@@ -288,26 +295,22 @@ mod tests {
         }
     }
 
-    fn mock_registration(
-        name: &str,
-        description: &str,
-        effects: Vec<ToolEffect>,
-    ) -> ToolRegistration {
+    fn mock_registration(name: &str, description: &str) -> ToolRegistration {
         ToolRegistration {
             definition: ToolBuilder::new(name, description)
                 .parameter("reason", "string", "reason")
                 .required("reason")
                 .build(),
             implementation: std::sync::Arc::new(MockTool::new("mock result")),
-            effects,
         }
     }
 
     #[tokio::test]
     async fn test_register_and_list_tools() {
-        let mut toolset = Toolset::new();
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let mut toolset = Toolset::new(Some(tx));
         toolset
-            .register(mock_registration("test_tool", "A test tool", vec![]))
+            .register(mock_registration("test_tool", "A test tool"))
             .unwrap();
 
         let tools = toolset.tools();
@@ -317,9 +320,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_tool() {
-        let mut toolset = Toolset::new();
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let mut toolset = Toolset::new(Some(tx));
         toolset
-            .register(mock_registration("test_tool", "A test tool", vec![]))
+            .register(mock_registration("test_tool", "A test tool"))
             .unwrap();
 
         let tool_call = ToolUse {
@@ -331,28 +335,5 @@ mod tests {
         let results = toolset.execute(&[tool_call], None, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].tool_use_id, "tc1");
-        assert!(results[0].effects.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_execute_tool_with_effect() {
-        let mut toolset = Toolset::new();
-        toolset
-            .register(mock_registration(
-                "abort_task",
-                "Abort current task",
-                vec![ToolEffect::Abort],
-            ))
-            .unwrap();
-
-        let tool_call = ToolUse {
-            id: "tc2".to_string(),
-            name: "abort_task".to_string(),
-            input: json!({ "reason": "task aborted" }),
-        };
-
-        let results = toolset.execute(&[tool_call], None, None).await.unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].effects, vec![ToolEffect::Abort]);
     }
 }

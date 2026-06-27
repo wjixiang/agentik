@@ -72,6 +72,8 @@ pub type BgTaskNotifyTx = tokio::sync::mpsc::UnboundedSender<InternalEvent>;
 /// allowing the agent to wake up without polling.
 pub struct TaskEntry {
     id: TaskId,
+    /// The tool's display name (e.g. "run_bash"), distinct from the task id.
+    name: String,
     status: watch::Receiver<TaskStatus>,
     cancel_token: CancellationToken,
     block_secs: u64,
@@ -91,17 +93,19 @@ impl TaskEntry {
     /// read results exclusively through the watch channel.
     pub fn new(
         id: TaskId,
+        name: String,
         handle: JoinHandle<Result<ToolResult, ToolError>>,
         cancel_token: CancellationToken,
         block_secs: u64,
     ) -> Self {
-        Self::with_notify(id, handle, cancel_token, block_secs, None)
+        Self::with_notify(id, name, handle, cancel_token, block_secs, None)
     }
 
     /// Like [`new`](Self::new) but also notifies the agent via `notify_tx`
     /// when a background task completes.
     pub fn with_notify(
         id: TaskId,
+        name: String,
         handle: JoinHandle<Result<ToolResult, ToolError>>,
         cancel_token: CancellationToken,
         block_secs: u64,
@@ -141,6 +145,7 @@ impl TaskEntry {
 
         Self {
             id,
+            name,
             status,
             cancel_token,
             block_secs,
@@ -156,6 +161,11 @@ impl TaskEntry {
     /// Return the task identifier.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Return the tool's display name.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Non-blocking read of current status.
@@ -188,6 +198,7 @@ impl TaskEntry {
                 match self.status.borrow().clone() {
                     TaskStatus::Done(result) => WaitResult { inner: WaitResultKind::Done { result, run_mode: RunMode::Fg }, read_tx: self.read_tx.clone() },
                     TaskStatus::Failed(err) => WaitResult { inner: WaitResultKind::Failed(ToolResult::error(err.to_string()).with_id(&self.id)), read_tx: self.read_tx.clone() },
+                    // WARN: this variant will never be reached
                     TaskStatus::Running =>
                        WaitResult { inner: WaitResultKind::StillRunning(self.id.clone()), read_tx: self.read_tx.clone() },
                 }
@@ -235,6 +246,7 @@ mod tests {
     async fn test_task_two_phase() {
         let mut task = TaskEntry::new(
             "test-task-1".into(),
+            "test_tool".into(),
             tokio::spawn(async {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 Ok(ToolResult::success("done"))

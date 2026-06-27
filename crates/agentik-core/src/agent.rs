@@ -22,7 +22,6 @@ use uuid::Uuid;
 use agentik_sdk::types::AgentEvent;
 
 use crate::prompt::system_prompt_builder;
-use crate::tools::ToolEffect;
 
 use crate::{
     error::{AgentError, Retryable},
@@ -58,6 +57,9 @@ pub enum InternalEvent {
     MessageInject(Vec<ContentBlock>),
     /// A background tool task completed; results already injected into memory.
     BgTaskComplete,
+    Done,
+    /// A tool requested the current session be aborted (e.g. `abort_task`).
+    Abort,
     /// External Runtime requests the agent to shut down.
     Shutdown,
 }
@@ -209,6 +211,44 @@ impl Agent {
         self.cancel_token = token;
     }
 
+    /// Apply a single [`InternalEvent`] against agent state.
+    ///
+    /// Returns `true` when the event represents new work that should keep
+    /// the (outer or session) loop running, and `false` for terminal
+    /// control signals (`Abort`, `Shutdown`) that ask the loop to stop.
+    async fn apply_internal_event(&mut self, event: InternalEvent) -> bool {
+        match event {
+            InternalEvent::MessageInject(content) => {
+                let _ = self.inject_message(content);
+                true
+            }
+            InternalEvent::BgTaskComplete => {
+                let completed = self.toolset.poll_completed_tasks().await;
+                for (id, ok, content) in &completed {
+                    self.send_event(agentik_sdk::types::AgentEvent::ToolBackgroundComplete {
+                        id: id.clone(),
+                        ok: *ok,
+                        content: content.clone(),
+                    });
+                    let _ = self.memory.remember(Message::tool_result(
+                        id.clone(),
+                        content.clone(),
+                        !ok,
+                    ));
+                }
+                true
+            }
+            InternalEvent::Abort | InternalEvent::Shutdown => {
+                self.lifecycle.set_aborted();
+                false
+            }
+            InternalEvent::Done => {
+                self.stop();
+                false
+            }
+        }
+    }
+
     /// Long-running event loop that drives the agent autonomously.
     ///
     /// Blocks until shut down.  Internal events wake the agent; the agent
@@ -229,29 +269,9 @@ impl Agent {
         loop {
             tokio::select! {
                 Some(event) = rx.recv() => {
-                    match event {
-                        InternalEvent::Shutdown => break,
-                        InternalEvent::MessageInject(content) => {
-                            let _ = self.inject_message(content);
-                        }
-                        InternalEvent::BgTaskComplete => {
-                            // Poll completed task results and inject into memory.
-                            let completed = self.toolset.poll_completed_tasks().await;
-                            for (id, ok, content) in &completed {
-                                self.send_event(
-                                    agentik_sdk::types::AgentEvent::ToolBackgroundComplete {
-                                        id: id.clone(),
-                                        ok: *ok,
-                                        content: content.clone(),
-                                    },
-                                );
-                                let _ = self.memory.remember(Message::tool_result(
-                                    id.clone(),
-                                    content.clone(),
-                                    !ok,
-                                ));
-                            }
-                        }
+                    let keep_going = self.apply_internal_event(event).await;
+                    if !keep_going {
+                        break;
                     }
                 }
                 _ = cancelled.cancelled() => {
@@ -301,9 +321,39 @@ impl Agent {
                         Ok(()) => {
                             consecutive_retries = 0;
                             self.snapshot().await;
-                            // No tool calls → agent is done for this session.
-                            self.send_event(agentik_sdk::types::AgentEvent::Done);
-                            break;
+                            // // Drain control events tools emitted this turn
+                            // // (e.g. `abort_task` sends `Abort`) before deciding
+                            // // whether the session is done.
+                            // let mut new_work = false;
+                            // let mut stop = false;
+                            // while let Ok(event) = rx.try_recv() {
+                            //     let keep_going = self.apply_internal_event(event).await;
+                            //     if keep_going {
+                            //         new_work = true;
+                            //     } else {
+                            //         stop = true;
+                            //     }
+                            // }
+                            // if stop {
+                            //     break;
+                            // }
+                            //
+                            // `agent_workflow` flips the lifecycle to IDLE when
+                            // the LLM produces no tool calls (natural completion).
+                            // That same flip makes `is_running()` false here, so
+                            // we must emit `Done` on this branch — otherwise the
+                            // `Done` below is unreachable and the TUI never leaves
+                            // the Running state.
+                            if !self.lifecycle.is_running() {
+                                self.send_event(agentik_sdk::types::AgentEvent::Done);
+                                break;
+                            }
+                            // if new_work {
+                            //     continue;
+                            // }
+                            // // No tool calls and no pending work → session done.
+                            // self.send_event(agentik_sdk::types::AgentEvent::Done);
+                            // break;
                         }
                         Err(AgentError::CompactionRebuild) => {
                             tracing::info!("compaction rebuild, re-entering workflow");
@@ -334,21 +384,7 @@ impl Agent {
                 }
                 // ── Event arrived during workflow — process, then restart ──
                 Some(event) = rx.recv() => {
-                    match event {
-                        InternalEvent::Shutdown => {
-                            self.lifecycle.set_aborted();
-                            self.snapshot().await;
-                        }
-                        InternalEvent::MessageInject(content) => {
-                            let _ = self.inject_message(content);
-                        }
-                        InternalEvent::BgTaskComplete => {
-                            tracing::info!("background task completed during workflow");
-                            self.send_event(AgentEvent::LlmResponse(
-                                "🔄 Background task completed".into(),
-                            ));
-                        }
-                    }
+                    self.apply_internal_event(event).await;
                 }
                 _ = cancelled.cancelled() => {
                     self.lifecycle.set_aborted();
@@ -386,7 +422,7 @@ impl Agent {
 
         self.send_event(agentik_sdk::types::AgentEvent::Requesting);
         let response_message = self.request(context, allowed.as_deref()).await?;
-        event!(Level::INFO, "",);
+
         let last_usage = response_message.usage.clone().unwrap_or_default();
 
         // Emit LLM text and thinking content for UI observation
@@ -416,7 +452,8 @@ impl Agent {
         // calls `attempt_complete`. The lifecycle is flipped to IDLE so the
         // outer `start()` loop exits.
         if toolcalls.is_empty() {
-            self.lifecycle.set_idle();
+            // self.lifecycle.set_idle();
+            self.stop();
             return Ok(());
         }
 
@@ -438,24 +475,17 @@ impl Agent {
         tracing::debug!(?tool_results, "tool execution results");
 
         for tr in &tool_results {
-            let is_placeholder = matches!(&tr.content, ToolResultContent::Text(t) if t.contains("is running in backend"));
-            if is_placeholder {
-                // Find the original tool name from toolcalls by matching id.
-                let name = toolcalls
-                    .iter()
-                    .find(|tc| tc.id == tr.tool_use_id)
-                    .map(|tc| tc.name.as_str())
-                    .unwrap_or("unknown");
-                self.send_event(agentik_sdk::types::AgentEvent::ToolCallBackground {
-                    id: tr.tool_use_id.clone(),
-                    name: name.to_string(),
-                });
-            } else {
-                self.send_event(agentik_sdk::types::AgentEvent::ToolResult {
-                    ok: !tr.is_error.unwrap_or_default(),
-                    content: tr.text_content(),
-                });
-            }
+            // Background transitions are announced by the `Toolset` itself
+            // (it owns `agent_event_tx` and observes the sync→async boundary
+            // directly). Here we only surface results for tools that finished
+            // synchronously; pending-task placeholders are skipped.
+            // let is_placeholder = matches!(&tr.content, ToolResultContent::Text(t) if t.contains("is running in backend"));
+            // if !is_placeholder {
+            self.send_event(agentik_sdk::types::AgentEvent::ToolResult {
+                ok: !tr.is_error.unwrap_or_default(),
+                content: tr.text_content(),
+            });
+            // }
         }
 
         for tr in &tool_results {
@@ -466,9 +496,12 @@ impl Agent {
             ))?;
         }
 
-        self.handle_effect(&tool_results).await;
-
         Ok(())
+    }
+
+    /// lifecycle method
+    fn stop(&mut self) {
+        self.lifecycle.set_idle();
     }
 
     /// Poll the optional context provider for dynamic data.
@@ -487,20 +520,6 @@ impl Agent {
         let rt = self.skill_runtime.as_ref()?;
         let guard = rt.lock().await;
         Some(guard.allowed_tools_for_current_step())
-    }
-
-    /// Apply agent-level effects declared by tool results (e.g. lifecycle transitions).
-    async fn handle_effect(&mut self, tool_results: &[agentik_sdk::types::tools::ToolResult]) {
-        let effects: Vec<ToolEffect> = tool_results
-            .iter()
-            .flat_map(|ts| ts.effects.clone())
-            .collect();
-
-        effects.iter().for_each(|e| match e {
-            ToolEffect::Abort => {
-                self.lifecycle.set_aborted();
-            }
-        });
     }
 
     async fn build_context(&mut self) -> Result<Vec<Message>, AgentError> {

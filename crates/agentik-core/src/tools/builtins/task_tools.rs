@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -18,11 +18,11 @@ use crate::tools::{ToolError, ToolFunction, ToolRegistration};
 pub struct ViewTaskResultsInput {}
 
 pub struct TaskResultViewerTool {
-    tasks: Arc<Mutex<Vec<TaskEntry>>>,
+    tasks: Arc<RwLock<Vec<TaskEntry>>>,
 }
 
 impl TaskResultViewerTool {
-    pub fn new(tasks: Arc<Mutex<Vec<TaskEntry>>>) -> Self {
+    pub fn new(tasks: Arc<RwLock<Vec<TaskEntry>>>) -> Self {
         Self { tasks }
     }
 }
@@ -36,10 +36,10 @@ impl ToolFunction for TaskResultViewerTool {
     }
 
     async fn run(&self, _input: Self::Input) -> Result<AgentToolResult, ToolError> {
-        let mut tasks = self.tasks.lock().await;
+        let tasks = self.tasks.read().await;
         let mut results = Vec::new();
 
-        for entry in tasks.iter_mut() {
+        for entry in tasks.iter() {
             if entry.is_read() {
                 continue;
             }
@@ -71,7 +71,7 @@ impl ToolFunction for TaskResultViewerTool {
     }
 }
 
-pub fn task_registrations(tasks: Arc<Mutex<Vec<TaskEntry>>>) -> Vec<ToolRegistration> {
+pub fn task_registrations(tasks: Arc<RwLock<Vec<TaskEntry>>>) -> Vec<ToolRegistration> {
     vec![
         ToolRegistration::from(TaskResultViewerTool::new(tasks.clone())),
         ToolRegistration::from(TaskStatusViewerTool::new(tasks)),
@@ -90,11 +90,11 @@ pub fn task_registrations(tasks: Arc<Mutex<Vec<TaskEntry>>>) -> Vec<ToolRegistra
 pub struct ViewTaskStatusInput {}
 
 pub struct TaskStatusViewerTool {
-    tasks: Arc<Mutex<Vec<TaskEntry>>>,
+    tasks: Arc<RwLock<Vec<TaskEntry>>>,
 }
 
 impl TaskStatusViewerTool {
-    pub fn new(tasks: Arc<Mutex<Vec<TaskEntry>>>) -> Self {
+    pub fn new(tasks: Arc<RwLock<Vec<TaskEntry>>>) -> Self {
         Self { tasks }
     }
 }
@@ -104,11 +104,11 @@ impl ToolFunction for TaskStatusViewerTool {
     type Input = ViewTaskStatusInput;
 
     fn sync_seconds(&self) -> u64 {
-        1
+        30
     }
 
     async fn run(&self, _input: Self::Input) -> Result<AgentToolResult, ToolError> {
-        let tasks = self.tasks.lock().await;
+        let tasks = self.tasks.read().await;
         let mut results = Vec::new();
 
         for entry in tasks.iter() {
@@ -119,7 +119,7 @@ impl ToolFunction for TaskStatusViewerTool {
             };
             results.push(serde_json::json!({
                 "task_id": entry.id(),
-                "name": entry.id(), // TODO: store tool name in TaskEntry
+                "name": entry.name(),
                 "status": status_str,
                 "output": entry.output(),
             }));

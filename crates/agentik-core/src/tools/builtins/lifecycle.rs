@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use agentik_sdk::types::ToolEffect;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::agent::InternalEvent;
 use agentik_sdk::types::tools::{ToolResult, ToolResultContent};
 
 use crate::tools::{ToolError, ToolFunction, ToolRegistration};
@@ -17,31 +19,37 @@ pub struct AbortTaskInput {
     pub reason: String,
 }
 
-pub struct AbortTaskTool;
+/// Tool that requests the current session be aborted.
+///
+/// Holds a clone of the agent's [`InternalEvent`] sender so it can signal
+/// [`InternalEvent::Abort`] dynamically at run time — the agent's event
+/// loop honors the signal and ends the session without emitting `Done`.
+pub struct AbortTaskTool {
+    event_tx: UnboundedSender<InternalEvent>,
+}
+
+impl AbortTaskTool {
+    pub fn new(event_tx: UnboundedSender<InternalEvent>) -> Self {
+        Self { event_tx }
+    }
+}
 
 #[async_trait]
 impl ToolFunction for AbortTaskTool {
     type Input = AbortTaskInput;
 
-    fn effects(&self) -> Vec<ToolEffect> {
-        vec![ToolEffect::Abort]
-    }
-
     async fn run(&self, input: AbortTaskInput) -> Result<ToolResult, ToolError> {
+        let _ = self.event_tx.send(InternalEvent::Abort);
         Ok(ToolResult {
             tool_use_id: "abort_task".to_string(),
-            content: ToolResultContent::Text(format!(
-                "Task aborted. Reason: {}",
-                input.reason
-            )),
+            content: ToolResultContent::Text(format!("Task aborted. Reason: {}", input.reason)),
             is_error: None,
-            effects: vec![],
         })
     }
 }
 
-pub fn lifecycle_registrations() -> Vec<ToolRegistration> {
-    vec![
-        ToolRegistration::from(AbortTaskTool),
-    ]
+pub fn lifecycle_registrations(
+    event_tx: UnboundedSender<InternalEvent>,
+) -> Vec<ToolRegistration> {
+    vec![ToolRegistration::from(AbortTaskTool::new(event_tx))]
 }
